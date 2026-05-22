@@ -1,15 +1,6 @@
 """Step 1: extract layer-32 residual activations from Gemma-3-12B on Modal.
 
-One-time setup:
-  1. python3 -m venv .venv && source .venv/bin/activate
-  2. pip install -r requirements.txt
-  3. Accept the Gemma license at https://huggingface.co/google/gemma-3-12b-pt
-  4. HF token (https://huggingface.co/settings/tokens):
-     - Use a classic token with Read access, OR
-     - Fine-grained token with "Read access to public gated repos" enabled
-  5. modal secret create --force huggingface HF_TOKEN=<token>
-     (--force overwrites; key must be exactly HF_TOKEN)
-  6. modal setup
+Make sure to set up HF token and accept the Gemma license at https://huggingface.co/google/gemma-3-12b-pt
 
 Run:
   modal run extract_activations.py

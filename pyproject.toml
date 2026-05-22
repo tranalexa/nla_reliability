@@ -1,7 +1,7 @@
 [project]
 name = "nla-reliability"
 version = "0.1.0"
-description = "Add your description here"
+description = "NLA reliability pipeline: extract Gemma activations, sample AV descriptions on Modal"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

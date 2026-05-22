@@ -5,9 +5,9 @@ Assumes row order in CSV matches activations parquet (Step 1, 400-row sample, se
 Usage:
   uv run python scripts/train_linear_probes.py
   uv run python scripts/train_linear_probes.py \\
-    --activations activations_layer32_persona-only_gemma3-12b-pt.parquet
+    --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet
   uv run python scripts/train_linear_probes.py \\
-    --activations activations_layer32_persona-only_gemma3-12b-pt.parquet \\
+    --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet \\
     --compare-activations activations_layer32.parquet
 """
 
@@ -189,7 +189,7 @@ def main() -> None:
         "--activations",
         type=Path,
         default=DEFAULT_PARQUET,
-        help="activations parquet from Step 1 (e.g. activations_layer32_persona-only_gemma3-12b-pt.parquet)",
+        help="activations parquet from Step 1 (e.g. activations_layer32_persona-only_gemma-3-12b-pt.parquet)",
     )
     p.add_argument(
         "--compare-activations",

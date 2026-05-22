@@ -17,8 +17,8 @@ if str(ROOT) not in sys.path:
 
 from prompt_modes import (  # noqa: E402
     INFOBOX_SUFFIX,
+    activations_basename,
     apply_prompt_mode,
-    output_paths,
     prepare_prompts,
 )
 
@@ -118,9 +118,9 @@ class ActivationSource:
         if not self.force_live:
             path = self.parquet_path
             hint = f" ({path})" if path else ""
-            expected = output_paths(
-                ".", self.layer, self.prompt_mode, self.model_id
-            )[0].lstrip("./")
+            expected = activations_basename(
+                self.layer, self.prompt_mode, self.model_id
+            )
             raise FileNotFoundError(
                 f"parquet not found{hint}. Run Step 1 or pass --live. "
                 f"Expected naming like {expected}"

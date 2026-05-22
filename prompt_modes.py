@@ -12,9 +12,17 @@ PERSONA_MODES = frozenset({"persona-only", "last-persona-token"})
 LEGACY_PARQUET = "activations_layer32.parquet"
 LEGACY_NPY = "activations_layer32.npy"
 
+DEFAULT_MODEL_ID = "google/gemma-3-12b-pt"
+DEFAULT_LAYER = 32
+
 
 def model_slug(model_id: str) -> str:
+    """e.g. google/gemma-3-12b-pt -> gemma-3-12b-pt"""
     return model_id.replace("google/", "").replace(".", "-")
+
+
+def activations_basename(layer: int, prompt_mode: str, model_id: str) -> str:
+    return f"activations_layer{layer}_{prompt_mode}_{model_slug(model_id)}.parquet"
 
 
 def output_paths(
@@ -26,6 +34,25 @@ def output_paths(
         )
     base = f"activations_layer{layer}_{prompt_mode}_{model_slug(model_id)}"
     return f"{cache_dir}/{base}.parquet", f"{cache_dir}/{base}.npy"
+
+
+def resolve_activations_parquet(
+    cache_dir: str,
+    *,
+    activations: str | None = None,
+    prompt_mode: str | None = None,
+    model_id: str = DEFAULT_MODEL_ID,
+    layer: int = DEFAULT_LAYER,
+) -> str:
+    """Pick activations path for Step 2: explicit path wins, else prompt_mode tagged file."""
+    if activations:
+        path = activations
+        if not path.startswith("/"):
+            path = f"{cache_dir.rstrip('/')}/{path.lstrip('/')}"
+        return path
+    if prompt_mode:
+        return output_paths(cache_dir, layer, prompt_mode, model_id)[0]
+    return f"{cache_dir.rstrip('/')}/{LEGACY_PARQUET}"
 
 
 def apply_prompt_mode(prompt: str, mode: str) -> tuple[str, bool]:

@@ -1,11 +1,15 @@
 """Step 2: sample AV descriptions from activations via SGLang + NLAClient on Modal.
 
 Prerequisites:
-  1. Step 1 done: /cache/activations_layer32.parquet on nla-cache volume
+  1. Step 1 done on nla-cache (activations parquet on volume)
   2. Accept license for kitft/nla-gemma3-12b-L32-av on HuggingFace
   3. modal secret create --force huggingface HF_TOKEN=<token>
 
-  modal run sample_descriptions.py
+Run:
+  uv run modal run sample_descriptions.py
+  uv run modal run sample_descriptions.py --prompt-mode persona-only
+  uv run modal run sample_descriptions.py \\
+    --activations /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet
 """
 
 import os
@@ -24,9 +28,6 @@ import pyarrow.parquet as pq
 AV_MODEL = "kitft/nla-gemma3-12b-L32-av"
 N_SAMPLES = 8
 TEMPERATURE = 1.0
-# SGLang requires max_new_tokens (no unlimited). Anthropic NLAs use ~500 per
-# explanation; 200 is enough for closed </explanation> on Gemma AV but 500 avoids
-# any truncation on long bullet lists. Step 2 cost scales ~linearly with this.
 MAX_NEW_TOKENS = 500
 PORT = 30000
 N_RETRIES = 3
@@ -38,8 +39,7 @@ N_SHARDS_DEFAULT = 12
 CACHE = "/cache"
 HF_CACHE = f"{CACHE}/hf"
 HF_HUB_CACHE = f"{CACHE}/hf/hub"
-ACTIVATIONS_PARQUET = f"{CACHE}/activations_layer32.parquet"
-DESCRIPTIONS_PARQUET = f"{CACHE}/descriptions.parquet"
+DEFAULT_DESCRIPTIONS_PARQUET = f"{CACHE}/descriptions.parquet"
 SGLANG_URL = f"http://127.0.0.1:{PORT}"
 
 app = modal.App("nla-sample")
@@ -60,6 +60,10 @@ image = (
     .add_local_file(
         Path(__file__).parent / "nla_inference.py",
         "/root/nla_inference.py",
+    )
+    .add_local_file(
+        Path(__file__).parent / "prompt_modes.py",
+        "/root/prompt_modes.py",
     )
 )
 
@@ -216,24 +220,30 @@ def _one_sample(cache: _EmbedCache, client, activation_idx: int, sample_idx: int
     volumes={CACHE: vol},
     secrets=[modal.Secret.from_name("huggingface")],
 )
-def run_shard(shard_id: int, n_shards: int):
+def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
     sys.path.insert(0, "/root")
 
     vol.reload()
     setup_hf_cache()
 
-    if not Path(ACTIVATIONS_PARQUET).exists():
-        raise FileNotFoundError(f"missing {ACTIVATIONS_PARQUET} — run extract_activations.py first")
+    if not Path(activations_parquet).exists():
+        raise FileNotFoundError(
+            f"missing {activations_parquet} — run extract_activations.py first "
+            "(e.g. --prompt-mode persona-only)"
+        )
 
-    table = pq.read_table(ACTIVATIONS_PARQUET)
+    table = pq.read_table(activations_parquet)
     vectors = table.column("activation_vector").to_pylist()
     n_activations = len(vectors)
     if n_activations == 0:
-        raise ValueError(f"empty {ACTIVATIONS_PARQUET}")
+        raise ValueError(f"empty {activations_parquet}")
 
     indices = [i for i in range(n_activations) if i % n_shards == shard_id]
     out_path = shard_parquet(shard_id)
-    print(f"shard {shard_id}/{n_shards}: {len(indices)} activations -> {out_path}")
+    print(
+        f"shard {shard_id}/{n_shards}: {len(indices)} activations "
+        f"from {activations_parquet} -> {out_path}"
+    )
 
     av_dir = download_av()
     vol.commit()
@@ -276,7 +286,7 @@ def run_shard(shard_id: int, n_shards: int):
     timeout=600,
     volumes={CACHE: vol},
 )
-def merge_shards(n_shards: int):
+def merge_shards(n_shards: int, output_parquet: str = DEFAULT_DESCRIPTIONS_PARQUET):
     vol.reload()
     dfs = []
     for shard_id in range(n_shards):
@@ -291,12 +301,41 @@ def merge_shards(n_shards: int):
     assert len(df) == expected, (
         f"expected {expected} rows ({n_act} activations × {N_SAMPLES}), got {len(df)}"
     )
-    df.to_parquet(DESCRIPTIONS_PARQUET, index=False)
+    df.to_parquet(output_parquet, index=False)
     vol.commit()
-    print(f"merged {len(df)} rows -> {DESCRIPTIONS_PARQUET}")
+    print(f"merged {len(df)} rows -> {output_parquet}")
 
 
 @app.local_entrypoint()
-def main(n_shards: int = N_SHARDS_DEFAULT):
-    list(run_shard.map(range(n_shards), kwargs={"n_shards": n_shards}))
-    merge_shards.remote(n_shards)
+def main(
+    n_shards: int = N_SHARDS_DEFAULT,
+    activations: str = "",
+    prompt_mode: str = "",
+    output: str = DEFAULT_DESCRIPTIONS_PARQUET,
+    model_id: str = "google/gemma-3-12b-pt",
+    layer: int = 32,
+):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prompt_modes import resolve_activations_parquet
+
+    activations_parquet = resolve_activations_parquet(
+        CACHE,
+        activations=activations or None,
+        prompt_mode=prompt_mode or None,
+        model_id=model_id,
+        layer=layer,
+    )
+    output_parquet = output if output.startswith("/") else f"{CACHE}/{output.lstrip('/')}"
+    print(f"activations: {activations_parquet}")
+    print(f"output: {output_parquet}")
+
+    list(
+        run_shard.map(
+            range(n_shards),
+            kwargs={
+                "n_shards": n_shards,
+                "activations_parquet": activations_parquet,
+            },
+        )
+    )
+    merge_shards.remote(n_shards, output_parquet=output_parquet)

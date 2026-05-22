@@ -42,6 +42,8 @@ HF_HUB_CACHE = f"{CACHE}/hf/hub"
 DEFAULT_DESCRIPTIONS_PARQUET = f"{CACHE}/descriptions.parquet"
 SGLANG_URL = f"http://127.0.0.1:{PORT}"
 
+NLA_PKG = Path(__file__).resolve().parent / "nla"
+
 app = modal.App("nla-sample")
 vol = modal.Volume.from_name("nla-cache", create_if_missing=True)
 
@@ -57,14 +59,7 @@ image = (
         "pyarrow",
         "huggingface_hub",
     )
-    .add_local_file(
-        Path(__file__).parent / "nla_inference.py",
-        "/root/nla_inference.py",
-    )
-    .add_local_file(
-        Path(__file__).parent / "prompt_modes.py",
-        "/root/prompt_modes.py",
-    )
+    .add_local_dir(NLA_PKG, "/root/nla")
 )
 
 
@@ -150,7 +145,7 @@ def wait_ready(process: subprocess.Popen, timeout: int = READY_TIMEOUT) -> None:
 def _make_client(av_dir: str):
     import numpy as np
     import torch
-    from nla_inference import NLAClient
+    from nla.nla_inference import NLAClient
 
     client = NLAClient(av_dir, sglang_url=SGLANG_URL)
     client._http.close()
@@ -165,7 +160,7 @@ def _make_client(av_dir: str):
 
 
 def _text_from_out(out: dict) -> str:
-    from nla_inference import EXPLANATION_RE
+    from nla.nla_inference import EXPLANATION_RE
 
     text = out["text"]
     m = EXPLANATION_RE.search(text)
@@ -317,7 +312,7 @@ def main(
     layer: int = 32,
 ):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from prompt_modes import resolve_activations_parquet
+    from nla.prompt_modes import resolve_activations_parquet
 
     if full:
         prompt_mode = "full"

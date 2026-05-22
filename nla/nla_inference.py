@@ -1,3 +1,17 @@
+# nla_inference.py — vendored from the Natural Language Autoencoders (NLA) reference implementation.
+#
+# Upstream: https://github.com/kitft/natural_language_autoencoders
+#   (same filename on main: nla_inference.py)
+#
+# Describes the method from Anthropic / Transformer Circuits (2026):
+#   Fraser-Taliente, Kantamneni, Ong, et al.,
+#   "Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations"
+#   https://transformer-circuits.pub/2026/nla/index.html
+#   https://www.anthropic.com/research/natural-language-autoencoders
+#
+# This repo uses it for Modal Step 2 (activation verbalizer via SGLang). Prefer upstream
+# for bugfixes; keep local diffs minimal. See README "Attribution".
+
 """NLA actor inference via SGLang input_embeds — single-file, no nla package deps.
 
 An NLA (Natural Language Autoencoder) pair is two fine-tuned LMs that together

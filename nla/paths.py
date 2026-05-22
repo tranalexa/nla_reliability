@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from prompt_modes import (
+from nla.prompt_modes import (
     DEFAULT_LAYER,
     DEFAULT_MODEL_ID,
     DEFAULT_PROMPT_MODE,
@@ -12,10 +12,10 @@ from prompt_modes import (
     activations_basename,
 )
 
-ROOT = Path(__file__).resolve().parent
+# Repo root (parent of nla/ package)
+ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 
-# Remote prefix on volume (mounted at /cache in Modal jobs)
 MODAL_VOLUME = "nla-cache"
 MODAL_CACHE = "/cache"
 

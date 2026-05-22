@@ -4,6 +4,24 @@ SelfDescribe prompts describe a fictional person. We run **Gemma-3-12B** once pe
 
 Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
 
+## Project layout
+
+```text
+extract_activations.py   # Modal Step 1 (run from repo root)
+sample_descriptions.py   # Modal Step 2
+nla/                     # shared library
+  prompt_modes.py        # persona vs full extraction
+  paths.py               # data/ paths + Modal volume names
+  activation_utils.py    # CSV + parquet loading, optional live Gemma
+  nla_inference.py       # NLAClient / SGLang AV (vendored from kitft; see Attribution)
+scripts/                 # local tools (pull, preview, probes)
+data/                    # downloaded volume artifacts (gitignored)
+```
+
+### Attribution (`nla/nla_inference.py`)
+
+Vendored from [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders) (`nla_inference.py` on main). Implements the **activation verbalizer** side of Natural Language Autoencoders (NLAs) from Anthropic / [Transformer Circuits (2026)](https://transformer-circuits.pub/2026/nla/index.html). This reliability repo does not retrain NLAs; it uses the published [Gemma-3 AV checkpoint](https://huggingface.co/kitft/nla-gemma3-12b-L32-av) on Modal.
+
 ---
 
 ## Pipeline overview

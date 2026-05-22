@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Literal
 
@@ -11,11 +10,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from prompt_modes import (  # noqa: E402
+from nla.prompt_modes import (
     INFOBOX_SUFFIX,
     activations_basename,
     apply_prompt_mode,
@@ -26,7 +21,6 @@ MODEL_ID = "google/gemma-3-12b-pt"
 DEFAULT_LAYER = 32
 BATCH_SIZE = 4
 
-# Backward-compatible alias
 INFOBOX_BOILERPLATE = INFOBOX_SUFFIX
 
 PromptMode = Literal["full", "persona-only", "persona"]

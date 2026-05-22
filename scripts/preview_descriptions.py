@@ -18,8 +18,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from paths import DEFAULT_CSV, DEFAULT_DESCRIPTIONS  # noqa: E402
-from prompt_modes import INFOBOX_SUFFIX, apply_prompt_mode  # noqa: E402
+from nla.paths import DEFAULT_CSV, DEFAULT_DESCRIPTIONS  # noqa: E402
+from nla.prompt_modes import INFOBOX_SUFFIX, apply_prompt_mode  # noqa: E402
 
 DEFAULT_PROMPTS = DEFAULT_CSV
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "description_preview.txt"

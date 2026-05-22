@@ -3,10 +3,11 @@
 Assumes row order in CSV matches activations parquet (Step 1, 400-row sample, seed 42).
 
 Usage:
-  uv run python scripts/train_linear_probes.py
   uv run python scripts/pull_from_modal.py
   uv run python scripts/train_linear_probes.py
-  uv run python scripts/train_linear_probes.py --full   # pull + compare full activations
+  uv run python scripts/pull_from_modal.py --full
+  uv run python scripts/train_linear_probes.py \\
+    --compare-activations data/activations_layer32_full_gemma-3-12b-pt.parquet
 """
 
 from __future__ import annotations
@@ -24,10 +25,9 @@ from sklearn.model_selection import train_test_split
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from activation_utils import load_activation_matrix, load_selfdescribe  # noqa: E402
-from paths import DEFAULT_ACTIVATIONS_PERSONA, DEFAULT_CSV  # noqa: E402
+from nla.activation_utils import load_activation_matrix, load_selfdescribe  # noqa: E402
+from nla.paths import DEFAULT_ACTIVATIONS_PERSONA, DEFAULT_CSV  # noqa: E402
 
 ATTR_CLASSES = ("Gender", "Religion", "Occupation", "Country")
 

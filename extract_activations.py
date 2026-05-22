@@ -15,6 +15,8 @@ import shutil
 from pathlib import Path
 
 import modal
+
+NLA_PKG = Path(__file__).resolve().parent / "nla"
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -50,7 +52,7 @@ image = (
         "huggingface_hub",
         "pyarrow",
     )
-    .add_local_file("prompt_modes.py", "/root/prompt_modes.py")
+    .add_local_dir(NLA_PKG, "/root/nla")
 )
 
 
@@ -207,7 +209,7 @@ def run(
     import sys
 
     sys.path.insert(0, "/root")
-    from prompt_modes import (
+    from nla.prompt_modes import (
         LEGACY_NPY,
         LEGACY_PARQUET,
         output_paths,

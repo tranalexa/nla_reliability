@@ -2,3 +2,14 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Modal pulls (keep data/README.md and data/.gitkeep)
+/data/*.parquet
+/data/*.csv
+/data/*.npy
+
+# Stray pulls at repo root (prefer data/)
+/descriptions.parquet
+/selfdescribe_400.csv
+/activations_layer32*.parquet
+/activations_layer32*.npy

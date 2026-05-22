@@ -6,14 +6,14 @@ INFOBOX_SUFFIX = (
     "Write a hypothetical but realistic Wikipedia biography infobox for me."
 )
 
-PROMPT_MODES = frozenset({"full", "persona-only", "last-persona-token"})
-PERSONA_MODES = frozenset({"persona-only", "last-persona-token"})
+PROMPT_MODES = frozenset({"full", "persona-only"})
 
 LEGACY_PARQUET = "activations_layer32.parquet"
 LEGACY_NPY = "activations_layer32.npy"
 
 DEFAULT_MODEL_ID = "google/gemma-3-12b-pt"
 DEFAULT_LAYER = 32
+DEFAULT_PROMPT_MODE = "persona-only"
 
 
 def model_slug(model_id: str) -> str:
@@ -36,6 +36,17 @@ def output_paths(
     return f"{cache_dir}/{base}.parquet", f"{cache_dir}/{base}.npy"
 
 
+def default_activations_parquet(
+    cache_dir: str = ".",
+    *,
+    model_id: str = DEFAULT_MODEL_ID,
+    layer: int = DEFAULT_LAYER,
+    prompt_mode: str = DEFAULT_PROMPT_MODE,
+) -> str:
+    """Tagged activations path for the default prompt mode (persona-only)."""
+    return output_paths(cache_dir, layer, prompt_mode, model_id)[0]
+
+
 def resolve_activations_parquet(
     cache_dir: str,
     *,
@@ -44,15 +55,14 @@ def resolve_activations_parquet(
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = DEFAULT_LAYER,
 ) -> str:
-    """Pick activations path for Step 2: explicit path wins, else prompt_mode tagged file."""
+    """Pick activations path: explicit path wins, else tagged file for prompt_mode."""
     if activations:
         path = activations
         if not path.startswith("/"):
             path = f"{cache_dir.rstrip('/')}/{path.lstrip('/')}"
         return path
-    if prompt_mode:
-        return output_paths(cache_dir, layer, prompt_mode, model_id)[0]
-    return f"{cache_dir.rstrip('/')}/{LEGACY_PARQUET}"
+    mode = prompt_mode or DEFAULT_PROMPT_MODE
+    return output_paths(cache_dir, layer, mode, model_id)[0]
 
 
 def apply_prompt_mode(prompt: str, mode: str) -> tuple[str, bool]:
@@ -74,7 +84,7 @@ def prepare_prompts(
     out: list[str] = []
     for i, p in enumerate(raw_prompts):
         text, stripped = apply_prompt_mode(p, mode)
-        if mode in PERSONA_MODES and not stripped:
+        if mode == "persona-only" and not stripped:
             missing.append(i)
         out.append(text)
     if missing:

@@ -7,9 +7,9 @@ Prerequisites:
 
 Run:
   uv run modal run sample_descriptions.py
-  uv run modal run sample_descriptions.py --prompt-mode persona-only
+  uv run modal run sample_descriptions.py --full
   uv run modal run sample_descriptions.py \\
-    --activations /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet
+    --activations /cache/activations_layer32_full_gemma-3-12b-pt.parquet
 """
 
 import os
@@ -310,7 +310,8 @@ def merge_shards(n_shards: int, output_parquet: str = DEFAULT_DESCRIPTIONS_PARQU
 def main(
     n_shards: int = N_SHARDS_DEFAULT,
     activations: str = "",
-    prompt_mode: str = "",
+    prompt_mode: str = "persona-only",
+    full: bool = False,
     output: str = DEFAULT_DESCRIPTIONS_PARQUET,
     model_id: str = "google/gemma-3-12b-pt",
     layer: int = 32,
@@ -318,10 +319,12 @@ def main(
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from prompt_modes import resolve_activations_parquet
 
+    if full:
+        prompt_mode = "full"
     activations_parquet = resolve_activations_parquet(
         CACHE,
         activations=activations or None,
-        prompt_mode=prompt_mode or None,
+        prompt_mode=prompt_mode,
         model_id=model_id,
         layer=layer,
     )

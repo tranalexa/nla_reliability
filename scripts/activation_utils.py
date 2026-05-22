@@ -29,7 +29,7 @@ BATCH_SIZE = 4
 # Backward-compatible alias
 INFOBOX_BOILERPLATE = INFOBOX_SUFFIX
 
-PromptMode = Literal["full", "persona-only", "last-persona-token", "persona"]
+PromptMode = Literal["full", "persona-only", "persona"]
 TokenPosition = Literal["last"]
 
 _model_cache: tuple[object, object] | None = None
@@ -82,7 +82,7 @@ class ActivationSource:
     def __init__(
         self,
         *,
-        prompt_mode: PromptMode = "full",
+        prompt_mode: PromptMode = "persona-only",
         layer: int = DEFAULT_LAYER,
         parquet_path: str | Path | None = None,
         force_live: bool = False,
@@ -144,7 +144,7 @@ def get_activation(
     layer: int,
     token_position: TokenPosition = "last",
     *,
-    mode: PromptMode = "full",
+    mode: PromptMode = "persona-only",
     row_index: int | None = None,
     source: ActivationSource | None = None,
 ) -> np.ndarray:

@@ -1,8 +1,8 @@
 """Sample AV descriptions and write them beside the matching SelfDescribe prompt.
 
-Defaults expect local copies (e.g. from modal volume get):
-  descriptions.parquet
-  selfdescribe_400.csv
+Defaults expect artifacts in data/ (pull with scripts/pull_from_modal.py):
+  data/descriptions.parquet
+  data/selfdescribe_400.csv
 
 Usage:
   uv run python scripts/preview_descriptions.py
@@ -18,10 +18,10 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from paths import DEFAULT_CSV, DEFAULT_DESCRIPTIONS  # noqa: E402
 from prompt_modes import INFOBOX_SUFFIX, apply_prompt_mode  # noqa: E402
 
-DEFAULT_DESCRIPTIONS = ROOT / "descriptions.parquet"
-DEFAULT_PROMPTS = ROOT / "selfdescribe_400.csv"
+DEFAULT_PROMPTS = DEFAULT_CSV
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "description_preview.txt"
 
 
@@ -84,7 +84,7 @@ def main(
     output_path: Path = DEFAULT_OUTPUT,
     n: int = 10,
     seed: int = 0,
-    activations_source: str = "",
+    activations_source: str = "persona-only",
     show_full_prompt: bool = False,
 ) -> None:
     merged = load_merged(descriptions_path, prompts_path)

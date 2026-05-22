@@ -4,11 +4,9 @@ Assumes row order in CSV matches activations parquet (Step 1, 400-row sample, se
 
 Usage:
   uv run python scripts/train_linear_probes.py
-  uv run python scripts/train_linear_probes.py \\
-    --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet
-  uv run python scripts/train_linear_probes.py \\
-    --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet \\
-    --compare-activations activations_layer32.parquet
+  uv run python scripts/pull_from_modal.py
+  uv run python scripts/train_linear_probes.py
+  uv run python scripts/train_linear_probes.py --full   # pull + compare full activations
 """
 
 from __future__ import annotations
@@ -29,11 +27,11 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from activation_utils import load_activation_matrix, load_selfdescribe  # noqa: E402
+from paths import DEFAULT_ACTIVATIONS_PERSONA, DEFAULT_CSV  # noqa: E402
 
 ATTR_CLASSES = ("Gender", "Religion", "Occupation", "Country")
 
-DEFAULT_CSV = ROOT / "selfdescribe_400.csv"
-DEFAULT_PARQUET = ROOT / "activations_layer32.parquet"
+DEFAULT_PARQUET = DEFAULT_ACTIVATIONS_PERSONA
 
 
 def _split_xy(
@@ -189,13 +187,13 @@ def main() -> None:
         "--activations",
         type=Path,
         default=DEFAULT_PARQUET,
-        help="activations parquet from Step 1 (e.g. activations_layer32_persona-only_gemma-3-12b-pt.parquet)",
+        help="activations parquet from Step 1 (default: persona-only tagged file)",
     )
     p.add_argument(
         "--compare-activations",
         type=Path,
         default=None,
-        help="second parquet for side-by-side probe comparison (e.g. legacy full-prompt file)",
+        help="second parquet for side-by-side probe comparison (e.g. data/activations_layer32_full_…parquet)",
     )
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)

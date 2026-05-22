@@ -1,171 +1,186 @@
 # nla_reliability
 
-Measure **reliability** of Natural Language Autoencoders (NLAs): how consistently an activation verbalizer (AV) describes the same internal vector under stochastic sampling.
+SelfDescribe prompts describe a fictional person. We run **Gemma-3-12B** once per prompt and save the **layer-32 last-token** hidden state (a 3840-d vector). A separate **activation verbalizer (AV)** never sees the prompt text—it only gets that vector and writes an explanation. We generate **8 stochastic** explanations per vector, then analyze consistency.
 
-Pipeline runs on [Modal](https://modal.com) with a shared volume `nla-cache` mounted at `/cache`.
+Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
 
-## Pipeline
+---
 
-### Step 1 — Extract activations
+## Pipeline overview
 
-We turn 400 SelfDescribe prompts (shuffled sample, seed 42) into fixed numerical “snapshots” of what Gemma-3-12B’s internal state looks at the **last token** after reading each prompt. Those layer-32 vectors are what we later ask the NLA verbalizer to describe.
+```text
+SelfDescribe CSV (400 rows)
+    → Step 1: Gemma forward → activations parquet
+    → Step 2: AV (SGLang) × 8 samples → descriptions parquet
+    → Pull to data/ → preview, linear probes (optional)
+```
+
+Row index `i` is aligned everywhere: same persona in CSV, activation `i`, and description rows with `activation_idx == i`.
+
+---
+
+## Step 1 — Extract activations
+
+**Concept:** An “activation” here is Gemma’s internal representation **right after reading** the prompt (last non-padding token, layer 32), L2-normalized. That snapshot is what we later feed to the AV.
+
+**Why persona-only (default)?** Every SelfDescribe prompt ends with the same line asking for a Wikipedia infobox. If we include that in the forward pass, the last token encodes “write an infobox,” not the persona—and AV outputs get generic/meta. Default mode strips that suffix and runs Gemma on the persona sentence only.
 
 | | |
 |--|--|
 | Script | `extract_activations.py` |
-| Model | `google/gemma-3-12b-pt` (override with `--model-id`) |
-| Default output | `activations_layer32.parquet` (N × 3840, unit L2 norm) — written when `--prompt-mode full` |
+| Model | `google/gemma-3-12b-pt` |
+| **Default** | `persona-only` |
+| Full prompt | `--full` |
 
-**Prompt modes** (`--prompt-mode`):
+| Mode | What Gemma reads | Output on volume |
+|------|------------------|------------------|
+| `persona-only` **(default)** | Persona text only | `activations_layer32_persona-only_gemma-3-12b-pt.parquet` |
+| `full` | Entire `user_prompt` | `activations_layer32_full_…parquet` + legacy `activations_layer32.parquet` |
 
-| Mode | Forward text | Output file on volume |
-|------|----------------|------------------------|
-| `full` (default) | Entire `user_prompt` | `/cache/activations_layer32_full_gemma-3-12b-pt.parquet` **and** legacy `/cache/activations_layer32.parquet` |
-| `persona-only` | Persona text only (suffix stripped) | `/cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet` |
-| `last-persona-token` | Same transform as `persona-only` | `/cache/activations_layer32_last-persona-token_gemma-3-12b-pt.parquet` |
-
-Model slug in filenames is `gemma-3-12b-pt` (from `google/gemma-3-12b-pt`).
-
-Persona modes remove one **exact** suffix string (no regex), split on the first occurrence, keep text before it:
+Exact suffix removed in persona mode:
 
 ```text
 Write a hypothetical but realistic Wikipedia biography infobox for me.
 ```
 
-If a row lacks that suffix, Step 1 logs a warning and uses the full prompt for that row. The AV in Step 2 still never sees prompt text—only the injected activation + investigator template.
+---
 
-### Step 2 — Sample descriptions
+## Step 2 — Sample descriptions
 
-We run the trained activation verbalizer on each saved vector many times with stochastic decoding.
+**Concept:** The AV is a fine-tuned Gemma that takes your vector (injected at a special token in a fixed investigator template) and autoregresses an `<explanation>…</explanation>` block. Temperature 1.0 → different wording each time. **Reliability** = how stable those wordings are for the **same** vector.
+
+**Default:** Uses persona-only activations from Step 1. Pass `--full` only if Step 1 was run with `--full`.
 
 | | |
 |--|--|
 | Script | `sample_descriptions.py` |
-| Model | `kitft/nla-gemma3-12b-L32-av` (SGLang) |
-| Output | `descriptions.parquet` (N × 8 rows) by default |
+| AV model | `kitft/nla-gemma3-12b-L32-av` |
+| Output | `descriptions.parquet` (400 activations × 8 samples = 3200 rows) |
 
-```text
-SelfDescribe (400) → Gemma-3-12B forward → L2-normalized activations
-                              ↓
-                    NLA AV (inject vector → generate)
-                              ↓
-                    descriptions.parquet (reliability analysis)
-```
+Expect AV text in a structured “investigator” style (often mentions tone, a paraphrased phrase, and what the model might say next)—not a clean copy of the CSV sentence.
 
-Row `i` in activations, CSV, and descriptions all refer to the **same** prompt (shuffle seed 42, first 400 rows).
+---
 
-## Compute (rough)
+## Setup (once per machine)
 
-| Step | Hardware | Scale | Wall clock (order of magnitude) |
-|------|----------|-------|----------------------------------|
-| Step 1 | 1× A100 | 400 forwards | ~5–15 min |
-| Step 2 | 12× A100-80GB | ~3.2k gens (400×8), `max_new_tokens=500` | ~30–90 min |
-
-## Setup (once)
+You need [uv](https://docs.astral.sh/uv/), a Modal account, and Hugging Face access to gated Gemma + AV weights.
 
 ```bash
 uv sync
 uv run modal setup
-modal secret create --force huggingface HF_TOKEN=<token>
+modal secret create --force huggingface HF_TOKEN=<your_hf_token>
 ```
 
-Accept licenses for [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt) and [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av).
+Accept licenses: [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt), [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av).
 
-## Run
+---
 
-### Step 1
+## Run on Modal
+
+### Step 1 — activations (~5–15 min, 1× A100)
 
 ```bash
-# Full-prompt activations (+ legacy activations_layer32.parquet)
-uv run modal run extract_activations.py --prompt-mode full
+uv run modal run extract_activations.py
 
-# Persona-only last token (recommended for attribute signal)
-uv run modal run extract_activations.py --prompt-mode persona-only
+# Optional: full prompt (for comparison / ablations)
+uv run modal run extract_activations.py --full
 ```
 
-### Step 2
-
-Default (legacy full-prompt activations on volume):
+### Step 2 — AV descriptions (~30–90 min, 12× A100 by default)
 
 ```bash
 uv run modal run sample_descriptions.py
+
+# Only if Step 1 used --full:
+uv run modal run sample_descriptions.py --full
 ```
 
-**Persona activations** (use vectors from persona Step 1):
+Fewer GPUs: `uv run modal run sample_descriptions.py --n-shards 1`
+
+---
+
+## Pull results locally (`data/`)
+
+**Concept:** Modal keeps files on the cloud volume. We copy the pieces you need into **`data/`** so local scripts have one place to look (not scattered at repo root).
 
 ```bash
-uv run modal run sample_descriptions.py --prompt-mode persona-only
+# Default: CSV + persona activations + descriptions
+uv run python scripts/pull_from_modal.py
+
+# Also pull full-prompt activation parquets (after Step 1 --full)
+uv run python scripts/pull_from_modal.py --full
+
+# Subset only
+uv run python scripts/pull_from_modal.py --only csv,descriptions
 ```
 
-Equivalent explicit path:
+Manual equivalent (same destinations):
 
 ```bash
-uv run modal run sample_descriptions.py \
-  --activations /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet
+modal volume get nla-cache /cache/selfdescribe_400.csv data/selfdescribe_400.csv
+modal volume get nla-cache /cache/descriptions.parquet data/descriptions.parquet
+modal volume get nla-cache /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet \
+  data/activations_layer32_persona-only_gemma-3-12b-pt.parquet
 ```
 
-Optional separate output file (keeps old `descriptions.parquet`):
+Preview (reads from `data/` by default):
 
 ```bash
-uv run modal run sample_descriptions.py --prompt-mode persona-only \
-  --output descriptions_persona.parquet
+uv run python scripts/preview_descriptions.py
+# → scripts/description_preview.txt
 ```
 
-Fewer shards:
+If a pull fails: `modal volume ls nla-cache`, or match the path from Step 1 logs (`output parquet -> ...`).
+
+---
+
+## Volume artifacts (`nla-cache` → `/cache` in jobs)
+
+| Path | What it is |
+|------|------------|
+| `selfdescribe_400.csv` | 400 prompts + `attr_class` / `attr` labels |
+| `activations_layer32_persona-only_gemma-3-12b-pt.parquet` | Default vectors (persona last-token) |
+| `activations_layer32.parquet` | Legacy alias; only written when Step 1 uses `--full` |
+| `descriptions.parquet` | `activation_idx`, `sample_idx`, `description` |
+| `hf/` | Cached model weights (reuse across runs) |
+
+---
+
+## Linear probes (optional, local CPU)
+
+**Concept:** A quick sanity check—not the main reliability metric. We train a simple logistic regression on activations to predict dataset labels within each `attr_class` (Gender, Religion, Occupation, Country). If persona-only activations beat full-prompt ones on probe accuracy (especially where full-prompt was near the majority baseline), extraction is carrying more persona signal.
 
 ```bash
-uv run modal run sample_descriptions.py --prompt-mode persona-only --n-shards 1
-```
-
-### Download & preview
-
-```bash
-modal volume get nla-cache /cache/selfdescribe_400.csv selfdescribe_400.csv
-modal volume get nla-cache /cache/descriptions.parquet descriptions.parquet
-modal volume get nla-cache /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet .
-
-uv run python scripts/preview_descriptions.py --activations-source persona-only
-```
-
-Preview shows **persona text** (suffix stripped), not the raw CSV infobox line. AV descriptions come from whatever activations Step 2 used—re-run Step 2 with `--prompt-mode persona-only` after persona extraction.
-
-## Volume artifacts (`nla-cache` → `/cache`)
-
-| Path | Contents |
-|------|----------|
-| `selfdescribe_400.csv` | `user_prompt`, `attr_class`, `attr` (400 rows) |
-| `activations_layer32.parquet` | Full-prompt activations (`--prompt-mode full`) |
-| `activations_layer32_{mode}_gemma-3-12b-pt.parquet` | Tagged Step 1 outputs |
-| `descriptions.parquet` | AV samples (default Step 2 output) |
-| `hf/` | Cached HF weights |
-
-## Linear probes (local)
-
-```bash
-modal volume get nla-cache /cache/selfdescribe_400.csv selfdescribe_400.csv
-modal volume get nla-cache /cache/activations_layer32.parquet activations_layer32.parquet
-modal volume get nla-cache /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet .
-
+uv run python scripts/pull_from_modal.py
 uv run python scripts/train_linear_probes.py
+
+# Compare to full-prompt activations (pull after Step 1 --full):
+uv run python scripts/pull_from_modal.py --full
 uv run python scripts/train_linear_probes.py \
-  --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet \
-  --compare-activations activations_layer32.parquet
+  --compare-activations data/activations_layer32_full_gemma-3-12b-pt.parquet
 ```
 
 | Flag | Meaning |
 |------|---------|
-| `--activations PATH` | Parquet from Step 1 (default: `activations_layer32.parquet`) |
-| `--compare-activations PATH` | Second parquet; side-by-side probe table |
-| `--csv PATH` | SelfDescribe CSV (default: `selfdescribe_400.csv`) |
+| `--activations` | Which parquet to probe (default: `data/…persona-only…parquet`) |
+| `--compare-activations` | Second parquet; prints side-by-side accuracies |
+| `--csv` | Prompts/labels (default: `data/selfdescribe_400.csv`) |
 
-## End-to-end persona workflow
+---
+
+## End to end pipeline
 
 ```bash
-uv run modal run extract_activations.py --prompt-mode persona-only
-uv run modal run sample_descriptions.py --prompt-mode persona-only
-modal volume get nla-cache /cache/descriptions.parquet descriptions.parquet
-uv run python scripts/preview_descriptions.py --activations-source persona-only
-uv run python scripts/train_linear_probes.py \
-  --activations activations_layer32_persona-only_gemma-3-12b-pt.parquet \
-  --compare-activations activations_layer32.parquet
+uv sync && uv run modal setup
+# set HF token once: modal secret create --force huggingface HF_TOKEN=...
+
+uv run modal run extract_activations.py
+uv run modal run sample_descriptions.py
+
+uv run python scripts/pull_from_modal.py
+
+uv run python scripts/preview_descriptions.py
+uv run python scripts/train_linear_probes.py
 ```
+
+**Check you’re done:** `data/descriptions.parquet` has 3200 rows; preview shows persona text (no infobox line) and AV text about the persona theme, not only “Wikipedia generator.”

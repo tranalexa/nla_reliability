@@ -2,16 +2,13 @@
 
 Samples 400 rows from Transluce/SelfDescribe-Llama-3.1-8B-Instruct (shuffle seed 42).
 
-Prompt modes (--prompt-mode):
-  full               — entire user_prompt (default; also writes legacy activations_layer32.parquet)
-  persona-only       — strip INFOBOX_SUFFIX, last-token on persona text
-  last-persona-token — same transform as persona-only; separate output filename for A/B runs
-
-Make sure to set up HF token and accept the Gemma license for your --model-id (default gemma-3-12b-pt).
+Prompt modes (--prompt-mode; default persona-only):
+  persona-only — strip INFOBOX_SUFFIX, last-token on persona text (default)
+  full         — entire user_prompt; pass --full or --prompt-mode full (writes legacy parquet)
 
 Run:
   uv run modal run extract_activations.py
-  uv run modal run extract_activations.py --prompt-mode persona-only
+  uv run modal run extract_activations.py --full
 """
 
 import shutil
@@ -203,7 +200,7 @@ def _write_activations(
     secrets=[modal.Secret.from_name("huggingface")],
 )
 def run(
-    prompt_mode: str = "full",
+    prompt_mode: str = "persona-only",
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
@@ -256,8 +253,11 @@ def run(
 
 @app.local_entrypoint()
 def main(
-    prompt_mode: str = "full",
+    prompt_mode: str = "persona-only",
+    full: bool = False,
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
+    if full:
+        prompt_mode = "full"
     run.remote(prompt_mode=prompt_mode, model_id=model_id, layer=layer)

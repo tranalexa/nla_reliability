@@ -1,12 +1,20 @@
 """Step 1: extract layer-32 residual activations from Gemma-3-12B on Modal.
 
-Make sure to set up HF token and accept the Gemma license at https://huggingface.co/google/gemma-3-12b-pt
+Samples 400 rows from Transluce/SelfDescribe-Llama-3.1-8B-Instruct (shuffle seed 42).
+
+Prompt modes (--prompt-mode):
+  full               — entire user_prompt (default; also writes legacy activations_layer32.parquet)
+  persona-only       — strip INFOBOX_SUFFIX, last-token on persona text
+  last-persona-token — same transform as persona-only; separate output filename for A/B runs
+
+Make sure to set up HF token and accept the Gemma license for your --model-id (default gemma-3-12b-pt).
 
 Run:
-  modal run extract_activations.py
+  uv run modal run extract_activations.py
+  uv run modal run extract_activations.py --prompt-mode persona-only
 """
 
-import os
+import shutil
 from pathlib import Path
 
 import modal
@@ -18,38 +26,40 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# --- constants ---
-# google/gemma-3-12b is the family name only; weights are at -pt (pretrained) or -it (instruct)
-MODEL_ID = "google/gemma-3-12b-pt"
+DEFAULT_MODEL_ID = "google/gemma-3-12b-pt"
 LAYER = 32
-N_PROMPTS = 400
-BATCH_SIZE = 4  # 12B on A100; increase if memory allows
+BATCH_SIZE = 8  # 12B on A100; lower if OOM
 SELF_DESCRIBE_DATASET = "Transluce/SelfDescribe-Llama-3.1-8B-Instruct"
+N_PROMPTS = 400
 SAMPLE_SEED = 42
 
 CACHE = "/cache"
 HF_CACHE = f"{CACHE}/hf"
 HF_HUB_CACHE = f"{HF_CACHE}/hub"
 CSV_PATH = f"{CACHE}/selfdescribe_400.csv"
-ACTIVATIONS_PATH = f"{CACHE}/activations_layer32.npy"
-ACTIVATIONS_PARQUET_PATH = f"{CACHE}/activations_layer32.parquet"
 
 app = modal.App("nla-extract")
 vol = modal.Volume.from_name("nla-cache", create_if_missing=True)
 
-image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "torch",
-    "transformers>=4.49",
-    "accelerate",
-    "pandas",
-    "numpy",
-    "datasets",
-    "huggingface_hub",
-    "pyarrow",
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "torch",
+        "transformers>=4.49",
+        "accelerate",
+        "pandas",
+        "numpy",
+        "datasets",
+        "huggingface_hub",
+        "pyarrow",
+    )
+    .add_local_file("prompt_modes.py", "/root/prompt_modes.py")
 )
 
 
 def setup_hf_cache() -> None:
+    import os
+
     Path(HF_HUB_CACHE).mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = HF_CACHE
     os.environ["HF_HUB_CACHE"] = HF_HUB_CACHE
@@ -58,6 +68,8 @@ def setup_hf_cache() -> None:
 
 
 def hf_token() -> str:
+    import os
+
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
         raise RuntimeError(
@@ -68,25 +80,30 @@ def hf_token() -> str:
     return token
 
 
-def ensure_csv(volume: modal.Volume) -> None:
+def ensure_csv(volume: modal.Volume) -> int:
     if Path(CSV_PATH).exists():
-        return
+        n = len(pd.read_csv(CSV_PATH))
+        if n == N_PROMPTS:
+            print(f"using existing CSV ({n} rows) -> {CSV_PATH}")
+            return n
+        print(f"regenerating CSV ({n} != {N_PROMPTS} rows)")
     ds = load_dataset(SELF_DESCRIBE_DATASET, split="train", token=hf_token())
     ds = ds.shuffle(seed=SAMPLE_SEED).select(range(N_PROMPTS))
-    # Stratified: ds = ds.shuffle(seed=SAMPLE_SEED).to_pandas().groupby("attr_class", group_keys=False).apply(lambda g: g.sample(n=100, random_state=SAMPLE_SEED))
     df = ds.to_pandas()[["user_prompt", "attr_class", "attr"]]
+    assert len(df) == N_PROMPTS
     df.to_csv(CSV_PATH, index=False)
     volume.commit()
     print(f"wrote {len(df)} rows -> {CSV_PATH}")
+    return len(df)
 
 
-def load_model():
+def load_model(model_id: str):
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import HfHubHTTPError
 
     token = hf_token()
     try:
-        model_dir = snapshot_download(MODEL_ID, cache_dir=HF_HUB_CACHE, token=token)
+        model_dir = snapshot_download(model_id, cache_dir=HF_HUB_CACHE, token=token)
     except HfHubHTTPError as e:
         if e.response.status_code == 403:
             raise RuntimeError(
@@ -111,7 +128,6 @@ def load_model():
         device_map="cuda",
     ).eval()
 
-    # Gemma-3 loads as a multimodal wrapper; use the text CausalLM for forward.
     if hasattr(model, "language_model"):
         inner = model.language_model
         if hasattr(inner, "lm_head"):
@@ -128,7 +144,8 @@ def load_model():
 
 def read_prompts(path: str) -> list[str]:
     df = pd.read_csv(path)
-    assert len(df) == N_PROMPTS, f"expected {N_PROMPTS} rows, got {len(df)}"
+    if len(df) == 0:
+        raise ValueError(f"empty CSV at {path}")
     return df["user_prompt"].tolist()
 
 
@@ -155,7 +172,6 @@ def extract_activations(model, tokenizer, prompts: list[str], layer: int) -> np.
                 output_hidden_states=True,
                 use_cache=False,
             )
-            # hidden_states[0] = embeddings; hidden_states[layer+1] = post-layer-{layer} residual
             hidden = out.hidden_states[layer + 1]
 
             lengths = attention_mask.sum(dim=1).cpu()
@@ -171,36 +187,77 @@ def l2_normalize(x: np.ndarray) -> np.ndarray:
     return x / norms
 
 
+def _write_activations(
+    acts: np.ndarray, parquet_path: str, npy_path: str
+) -> None:
+    np.save(npy_path, acts)
+    table = pa.table({"activation_vector": acts.tolist()})
+    pq.write_table(table, parquet_path)
+
+
 @app.function(
     image=image,
     gpu="A100",
-    timeout=3600,
+    timeout=7200,
     volumes={CACHE: vol},
     secrets=[modal.Secret.from_name("huggingface")],
 )
-def run():
+def run(
+    prompt_mode: str = "full",
+    model_id: str = DEFAULT_MODEL_ID,
+    layer: int = LAYER,
+):
+    import sys
+
+    sys.path.insert(0, "/root")
+    from prompt_modes import (
+        LEGACY_NPY,
+        LEGACY_PARQUET,
+        output_paths,
+        prepare_prompts,
+    )
+
     vol.reload()
     setup_hf_cache()
 
-    ensure_csv(vol)
-    prompts = read_prompts(CSV_PATH)
-    model, tokenizer = load_model()
-    vol.commit()  # persist hub cache across runs
+    n_rows = ensure_csv(vol)
+    raw_prompts = read_prompts(CSV_PATH)
+    assert len(raw_prompts) == n_rows
+    prompts, missing_suffix = prepare_prompts(raw_prompts, prompt_mode)
 
-    acts = extract_activations(model, tokenizer, prompts, LAYER)
+    parquet_path, npy_path = output_paths(CACHE, layer, prompt_mode, model_id)
+    print(f"prompt_mode={prompt_mode} model_id={model_id} layer={layer}")
+    print(f"output parquet -> {parquet_path}")
+
+    model, tokenizer = load_model(model_id)
+    vol.commit()
+
+    acts = extract_activations(model, tokenizer, prompts, layer)
     acts = l2_normalize(acts).astype(np.float32)
-    np.save(ACTIVATIONS_PATH, acts)
-    table = pa.table({"activation_vector": acts.tolist()})
-    pq.write_table(table, ACTIVATIONS_PARQUET_PATH)
+    _write_activations(acts, parquet_path, npy_path)
+
+    if prompt_mode == "full":
+        legacy_parquet = f"{CACHE}/{LEGACY_PARQUET}"
+        legacy_npy = f"{CACHE}/{LEGACY_NPY}"
+        shutil.copy2(parquet_path, legacy_parquet)
+        shutil.copy2(npy_path, legacy_npy)
+        print(f"legacy copy -> {legacy_parquet}")
+        print(f"legacy copy -> {legacy_npy}")
+
     vol.commit()
 
     norms = np.linalg.norm(acts, axis=1)
     print(f"shape: {acts.shape}")
     print(f"mean norm: {norms.mean():.6f}")
-    print(f"saved -> {ACTIVATIONS_PATH}")
-    print(f"saved -> {ACTIVATIONS_PARQUET_PATH}")
+    print(f"suffix missing on {len(missing_suffix)} row(s)")
+    print(f"saved -> {npy_path}")
+    print(f"saved -> {parquet_path}")
 
 
 @app.local_entrypoint()
-def main():
-    run.remote()
+def main(
+    prompt_mode: str = "full",
+    model_id: str = DEFAULT_MODEL_ID,
+    layer: int = LAYER,
+):
+    run.remote(prompt_mode=prompt_mode, model_id=model_id, layer=layer)

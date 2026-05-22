@@ -22,10 +22,12 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 AV_MODEL = "kitft/nla-gemma3-12b-L32-av"
-N_ACTIVATIONS = 400
 N_SAMPLES = 8
 TEMPERATURE = 1.0
-MAX_NEW_TOKENS = 96
+# SGLang requires max_new_tokens (no unlimited). Anthropic NLAs use ~500 per
+# explanation; 200 is enough for closed </explanation> on Gemma AV but 500 avoids
+# any truncation on long bullet lists. Step 2 cost scales ~linearly with this.
+MAX_NEW_TOKENS = 500
 PORT = 30000
 N_RETRIES = 3
 RETRY_SLEEP = 5
@@ -210,7 +212,7 @@ def _one_sample(cache: _EmbedCache, client, activation_idx: int, sample_idx: int
 @app.function(
     image=image,
     gpu="A100-80GB",
-    timeout=3600,
+    timeout=14400,
     volumes={CACHE: vol},
     secrets=[modal.Secret.from_name("huggingface")],
 )
@@ -225,9 +227,11 @@ def run_shard(shard_id: int, n_shards: int):
 
     table = pq.read_table(ACTIVATIONS_PARQUET)
     vectors = table.column("activation_vector").to_pylist()
-    assert len(vectors) == N_ACTIVATIONS
+    n_activations = len(vectors)
+    if n_activations == 0:
+        raise ValueError(f"empty {ACTIVATIONS_PARQUET}")
 
-    indices = [i for i in range(N_ACTIVATIONS) if i % n_shards == shard_id]
+    indices = [i for i in range(n_activations) if i % n_shards == shard_id]
     out_path = shard_parquet(shard_id)
     print(f"shard {shard_id}/{n_shards}: {len(indices)} activations -> {out_path}")
 
@@ -282,7 +286,11 @@ def merge_shards(n_shards: int):
         dfs.append(pd.read_parquet(path))
     df = pd.concat(dfs, ignore_index=True)
     df = df.sort_values(["activation_idx", "sample_idx"]).reset_index(drop=True)
-    assert len(df) == N_ACTIVATIONS * N_SAMPLES
+    n_act = df["activation_idx"].nunique()
+    expected = n_act * N_SAMPLES
+    assert len(df) == expected, (
+        f"expected {expected} rows ({n_act} activations × {N_SAMPLES}), got {len(df)}"
+    )
     df.to_parquet(DESCRIPTIONS_PARQUET, index=False)
     vol.commit()
     print(f"merged {len(df)} rows -> {DESCRIPTIONS_PARQUET}")

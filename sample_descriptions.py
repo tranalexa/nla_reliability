@@ -26,7 +26,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 AV_MODEL = "kitft/nla-gemma3-12b-L32-av"
-N_SAMPLES = 8
+N_SAMPLES = 12
 TEMPERATURE = 1.0
 MAX_NEW_TOKENS = 500
 PORT = 30000
@@ -283,6 +283,10 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
 )
 def merge_shards(n_shards: int, output_parquet: str = DEFAULT_DESCRIPTIONS_PARQUET):
     vol.reload()
+    out = Path(output_parquet)
+    if out.exists():
+        out.unlink()
+        print(f"removed stale {output_parquet}")
     dfs = []
     for shard_id in range(n_shards):
         path = shard_parquet(shard_id)

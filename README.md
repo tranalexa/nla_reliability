@@ -1,6 +1,6 @@
 # nla_reliability
 
-SelfDescribe prompts describe a fictional person. We run **Gemma-3-12B** once per prompt and save the **layer-32 last-token** hidden state (a 3840-d vector). A separate **activation verbalizer (AV)** never sees the prompt text—it only gets that vector and writes an explanation. We generate **8 stochastic** explanations per vector, then analyze consistency.
+SelfDescribe prompts describe a fictional person. We run **Gemma-3-12B** once per prompt and save the **layer-32 last-token** hidden state (a 3840-d vector). A separate **activation verbalizer (AV)** never sees the prompt text—it only gets that vector and writes an explanation. We generate **12 stochastic** explanations per vector, then analyze consistency.
 
 Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
 
@@ -9,6 +9,7 @@ Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persist
 ```text
 extract_activations.py   # Modal Step 1 (run from repo root)
 sample_descriptions.py   # Modal Step 2
+reconstruct_scores.py    # Modal Step 3 (AR pairwise + fidelity)
 nla/                     # shared library
   prompt_modes.py        # persona vs full extraction
   paths.py               # data/ paths + Modal volume names
@@ -29,7 +30,8 @@ Vendored from [kitft/natural_language_autoencoders](https://github.com/kitft/nat
 ```text
 SelfDescribe CSV (400 rows)
     → Step 1: Gemma forward → activations parquet
-    → Step 2: AV (SGLang) × 8 samples → descriptions parquet
+    → Step 2: AV (SGLang) × 12 samples → descriptions parquet
+    → Step 3: AR (NLACritic) → pairwise_consistency + fidelity_scores parquets
     → Pull to data/ → preview, linear probes (optional)
 ```
 
@@ -73,9 +75,28 @@ Write a hypothetical but realistic Wikipedia biography infobox for me.
 |--|--|
 | Script | `sample_descriptions.py` |
 | AV model | `kitft/nla-gemma3-12b-L32-av` |
-| Output | `descriptions.parquet` (400 activations × 8 samples = 3200 rows) |
+| Output | `descriptions.parquet` (400 activations × 12 samples = 4800 rows) |
 
 Expect AV text in a structured “investigator” style (often mentions tone, a paraphrased phrase, and what the model might say next)—not a clean copy of the CSV sentence.
+
+---
+
+## Step 3 — AR reconstruction + scores
+
+**Concept:** The AR (activation reconstructor) maps each AV description back to a 3840-d vector. **Pairwise consistency** = cosine similarity between reconstructions from different samples of the same activation (66 pairs × 400 activations = 26,400 rows, kept separate for G-theory). **Fidelity** = cosine similarity between each reconstruction and the original activation (4,800 rows).
+
+**Default:** Uses persona-only activations from Step 1 (same file Step 2 read).
+
+| | |
+|--|--|
+| Script | `reconstruct_scores.py` |
+| AR model | `kitft/nla-gemma3-12b-L32-ar` |
+| Inputs | persona activations parquet + `descriptions.parquet` |
+| Outputs | `pairwise_consistency.parquet` (26,400 rows), `fidelity_scores.parquet` (4,800 rows) |
+
+Pairwise cos uses L2-normalized reconstructions (`reconstruct()` returns raw vectors). Fidelity uses `NLACritic.score()`, which normalizes internally.
+
+Expected sanity-check ranges: pairwise and fidelity cos roughly 0.5–0.95, no NaNs.
 
 ---
 
@@ -89,7 +110,7 @@ uv run modal setup
 modal secret create --force huggingface HF_TOKEN=<your_hf_token>
 ```
 
-Accept licenses: [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt), [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av).
+Accept licenses: [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt), [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av), [nla-gemma3-12b-L32-ar](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar).
 
 ---
 
@@ -115,6 +136,14 @@ uv run modal run sample_descriptions.py --full
 
 Fewer GPUs: `uv run modal run sample_descriptions.py --n-shards 1`
 
+### Step 3 — AR scores (~15–45 min, 12× A100 by default)
+
+```bash
+uv run modal run reconstruct_scores.py
+```
+
+Fewer GPUs: `uv run modal run reconstruct_scores.py --n-shards 1`
+
 ---
 
 ## Pull results locally (`data/`)
@@ -139,6 +168,8 @@ modal volume get nla-cache /cache/selfdescribe_400.csv data/selfdescribe_400.csv
 modal volume get nla-cache /cache/descriptions.parquet data/descriptions.parquet
 modal volume get nla-cache /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet \
   data/activations_layer32_persona-only_gemma-3-12b-pt.parquet
+modal volume get nla-cache pairwise_consistency.parquet data/pairwise_consistency.parquet
+modal volume get nla-cache fidelity_scores.parquet data/fidelity_scores.parquet
 ```
 
 Preview (reads from `data/` by default):
@@ -194,6 +225,7 @@ uv sync && uv run modal setup
 
 uv run modal run extract_activations.py
 uv run modal run sample_descriptions.py
+uv run modal run reconstruct_scores.py
 
 uv run python scripts/pull_from_modal.py
 
@@ -201,4 +233,4 @@ uv run python scripts/preview_descriptions.py
 uv run python scripts/train_linear_probes.py
 ```
 
-**Check you’re done:** `data/descriptions.parquet` has 3200 rows; preview shows persona text (no infobox line) and AV text about the persona theme, not only “Wikipedia generator.”
+**Check you’re done:** `data/descriptions.parquet` has 4800 rows; preview shows persona text (no infobox line) and AV text about the persona theme, not only “Wikipedia generator.” After Step 3: `pairwise_consistency.parquet` has 26,400 rows, `fidelity_scores.parquet` has 4,800 rows; Modal logs show mean cos ~0.5–0.95 and no NaNs.

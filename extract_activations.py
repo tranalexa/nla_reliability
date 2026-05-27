@@ -12,9 +12,17 @@ Supported datasets (--dataset):
               CSV: /cache/biosbias_400.csv
               Activations: /cache/activations_layer32_biosbias_gemma-3-12b-pt.parquet
 
+  mmlu      — cais/mmlu
+              Samples 4 subjects × 100 questions = 400 items (seed 42).
+              Subjects: abstract_algebra, moral_scenarios, virology, astronomy.
+              Prompt format: "Question: ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer:"
+              CSV: /cache/mmlu_400.csv
+              Activations: /cache/activations_layer32_mmlu_gemma-3-12b-pt.parquet
+
 Run:
   uv run modal run extract_activations.py --dataset prism
   uv run modal run extract_activations.py --dataset biosbias
+  uv run modal run extract_activations.py --dataset mmlu
   uv run modal run extract_activations.py --all-datasets
   uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
 """
@@ -251,8 +259,8 @@ def main(
     layer: int = LAYER,
 ):
     """
-    --dataset       prism | biosbias  (default: prism)
-    --all-datasets  run both prism and biosbias in sequence
+    --dataset       prism | biosbias | mmlu  (default: prism)
+    --all-datasets  run prism, biosbias, and mmlu in sequence
     --n-items       items to sample per dataset (default: 400)
     --seed          shuffle seed (default: 42)
     """

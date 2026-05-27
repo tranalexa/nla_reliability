@@ -3,7 +3,7 @@
 Provides load_dataset_items() with a common schema:
 
   item_idx    (int)  — zero-based index; aligned with activation_idx in all outputs
-  dataset     (str)  — "prism" | "biosbias"
+  dataset     (str)  — "prism" | "biosbias" | "mmlu"
   prompt_text (str)  — text passed to Gemma for activation extraction
 
 Additional metadata columns are dataset-specific and are not required by the core
@@ -11,6 +11,7 @@ pipeline (Steps 1–3). They are preserved in the CSV for downstream diagnostic 
 
 PRISM metadata:    gender (model-predicted), gt_gender (survey ground truth)
 BiasBios metadata: profession, gender
+MMLU metadata:     subject, question, choices (JSON), answer, split
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import re
 import numpy as np
 import pandas as pd
 
-SUPPORTED_DATASETS: list[str] = ["prism", "biosbias"]
+SUPPORTED_DATASETS: list[str] = ["prism", "biosbias", "mmlu"]
 
 DEFAULT_N_ITEMS = 400
 DEFAULT_SEED = 42
@@ -172,6 +173,112 @@ def _load_biosbias(n_items: int, seed: int, *, hf_token: str | None = None) -> p
     return df_out
 
 
+# ── MMLU ──────────────────────────────────────────────────────────────────────
+
+MMLU_HF_SLUG = "cais/mmlu"
+MMLU_SUBJECTS = ["abstract_algebra", "moral_scenarios", "virology", "astronomy"]
+_MMLU_SPLIT_PREFERENCE = ("test", "validation")
+
+
+def _format_mmlu_prompt(question: str, choices: list) -> str:
+    parts = [f"Question: {question}", ""]
+    for letter, choice in zip("ABCD", choices):
+        parts.append(f"{letter}. {choice}")
+    parts.append("")
+    parts.append("Answer:")
+    return "\n".join(parts)
+
+
+def _mmlu_valid_indices(ds) -> list[int]:
+    return [
+        i
+        for i, row in enumerate(ds)
+        if (
+            row["question"].strip()
+            and len(row["choices"]) == 4
+            and all(c.strip() for c in row["choices"])
+            and row["answer"] is not None
+        )
+    ]
+
+
+def _load_mmlu(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.DataFrame:
+    import json
+
+    from datasets import load_dataset as hf_load
+
+    n_subjects = len(MMLU_SUBJECTS)
+    per_subject = (n_items + n_subjects - 1) // n_subjects  # ceiling division
+
+    # Prefer a single split that works for every subject (test first, then validation).
+    # Only fall back to per-subject selection if no common split covers all subjects.
+    common_split: str | None = None
+    subject_datasets: dict[str, object] = {}
+
+    for split in _MMLU_SPLIT_PREFERENCE:
+        candidate: dict[str, object] = {}
+        for subject in MMLU_SUBJECTS:
+            try:
+                ds = hf_load(MMLU_HF_SLUG, name=subject, split=split, token=hf_token)
+            except Exception:
+                break
+            valid = _mmlu_valid_indices(ds)
+            if len(valid) < per_subject:
+                break
+            candidate[subject] = ds.select(valid)
+        else:
+            # All subjects passed for this split.
+            common_split = split
+            subject_datasets = candidate
+            break
+
+    if common_split is None:
+        # Per-subject fallback: pick the first split that works for each subject individually.
+        for subject in MMLU_SUBJECTS:
+            for split in _MMLU_SPLIT_PREFERENCE:
+                try:
+                    ds = hf_load(MMLU_HF_SLUG, name=subject, split=split, token=hf_token)
+                except Exception:
+                    continue
+                valid = _mmlu_valid_indices(ds)
+                if len(valid) >= per_subject:
+                    subject_datasets[subject] = (split, ds.select(valid))
+                    break
+            else:
+                raise RuntimeError(
+                    f"MMLU subject {subject!r}: no split ({'/'.join(_MMLU_SPLIT_PREFERENCE)}) "
+                    f"with >= {per_subject} valid rows"
+                )
+
+    all_rows: list[dict] = []
+    for subject in MMLU_SUBJECTS:
+        if common_split is not None:
+            used_split = common_split
+            ds = subject_datasets[subject]
+        else:
+            used_split, ds = subject_datasets[subject]  # type: ignore[misc]
+
+        sampled = ds.shuffle(seed=seed).select(range(per_subject))
+        for record in sampled:
+            all_rows.append(
+                {
+                    "subject": subject,
+                    "question": record["question"],
+                    "choices": json.dumps(record["choices"]),
+                    "answer": int(record["answer"]),
+                    "split": used_split,
+                    "prompt_text": _format_mmlu_prompt(record["question"], record["choices"]),
+                }
+            )
+
+    df = pd.DataFrame(all_rows[:n_items])
+    df.insert(0, "item_idx", range(len(df)))
+    df.insert(1, "dataset", "mmlu")
+
+    assert len(df) == n_items, f"Expected {n_items} MMLU items, got {len(df)}"
+    return df
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def load_dataset_items(
@@ -192,4 +299,6 @@ def load_dataset_items(
         )
     if dataset == "prism":
         return _load_prism(n_items, seed, hf_token=hf_token)
+    if dataset == "mmlu":
+        return _load_mmlu(n_items, seed, hf_token=hf_token)
     return _load_biosbias(n_items, seed, hf_token=hf_token)

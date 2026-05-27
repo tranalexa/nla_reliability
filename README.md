@@ -1,6 +1,6 @@
 # nla_reliability
 
-This repo evaluates NLA reliability on two datasets: **PRISM** and **Bias in Bios**. For each dataset, we sample 400 items, extract Gemma-3-12B layer-32 activations, generate 12 AV descriptions per activation, reconstruct each description with AR, and evaluate consistency and fidelity using raw and mean-centered cosine diagnostics.
+This repo evaluates NLA reliability on three datasets: **PRISM**, **Bias in Bios**, and **MMLU**. For each dataset, we sample 400 items, extract Gemma-3-12B layer-32 activations, generate 12 AV descriptions per activation, reconstruct each description with AR, and evaluate consistency and fidelity using raw and mean-centered cosine diagnostics.
 
 Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
 
@@ -43,6 +43,29 @@ Each item is a biography (`hard_text` field, which already omits the opening nam
 
 Metadata kept in the CSV: `profession`, `gender`. These are not used by the core pipeline.
 
+### MMLU
+
+**Source:** `cais/mmlu`
+
+MMLU is sampled as four subjects × 100 questions rather than all 57 subjects. The four subjects are `abstract_algebra`, `moral_scenarios`, `virology`, and `astronomy`. This gives enough examples per subject for interpretable domain-level comparisons across formal reasoning, ethics/social judgment, biomedical science, and physical science.
+
+Each item is formatted as a multiple-choice question with four labeled options; the correct answer is kept as metadata only and is not included in `prompt_text`. The loader prefers the `test` split (falls back to `validation` if test has fewer than 100 usable rows per subject). No text scrubbing is applied.
+
+`prompt_text` format:
+
+```
+Question: {question}
+
+A. {choices[0]}
+B. {choices[1]}
+C. {choices[2]}
+D. {choices[3]}
+
+Answer:
+```
+
+Metadata kept in the CSV: `subject`, `question`, `choices` (JSON-serialized list), `answer` (integer index), `split` (which HF split was used).
+
 ---
 
 ## Pipeline overview
@@ -66,7 +89,8 @@ Row index `i` is aligned within each dataset: item `i` in the CSV ↔ activation
 |---------|-------|-------------|-----------------|---------------|---------------|
 | PRISM | 400 | 12 | 4,800 | 26,400 | 4,800 |
 | Bias in Bios | 400 | 12 | 4,800 | 26,400 | 4,800 |
-| **Total** | **800** | 12 | **9,600** | **52,800** | **9,600** |
+| MMLU | 400 | 12 | 4,800 | 26,400 | 4,800 |
+| **Total** | **1,200** | 12 | **14,400** | **79,200** | **14,400** |
 
 Pairwise rows = 400 × C(12, 2) = 400 × 66 = 26,400 per dataset.
 
@@ -151,7 +175,7 @@ All dataset loaders OK.
 
 ## Run on Modal
 
-Scripts accept `--dataset prism|biosbias` for single-dataset runs, or `--all-datasets` to run both in sequence with one command. Each dataset runs through the same stage independently; artifacts remain separate.
+Scripts accept `--dataset prism|biosbias|mmlu` for single-dataset runs, or `--all-datasets` to run all three in sequence with one command. Each dataset runs through the same stage independently; artifacts remain separate.
 
 > **Note — `--all-datasets` volume conflict:** When running both datasets sequentially with `--all-datasets`, the second dataset's container may fail with `RuntimeError: there are open files preventing the operation` if the first container's HuggingFace xet transfer logs are still open on the volume. This is a transient Modal platform race condition. If it happens, re-run the failed dataset individually (e.g. `--dataset biosbias`).
 
@@ -161,8 +185,9 @@ Scripts accept `--dataset prism|biosbias` for single-dataset runs, or `--all-dat
 # Single dataset
 uv run modal run extract_activations.py --dataset prism --n-items 400
 uv run modal run extract_activations.py --dataset biosbias --n-items 400
+uv run modal run extract_activations.py --dataset mmlu --n-items 400
 
-# Both datasets in one command (sequential)
+# All datasets in one command (sequential)
 uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
 ```
 
@@ -171,8 +196,9 @@ uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
 ```bash
 uv run modal run sample_descriptions.py --dataset prism --n-samples 12
 uv run modal run sample_descriptions.py --dataset biosbias --n-samples 12
+uv run modal run sample_descriptions.py --dataset mmlu --n-samples 12
 
-# Both datasets in one command
+# All datasets in one command
 uv run modal run sample_descriptions.py --all-datasets --n-samples 12
 ```
 
@@ -185,8 +211,9 @@ Pass `--save-vectors` to save raw reconstructed vectors; required for the center
 ```bash
 uv run modal run reconstruct_scores.py --dataset prism --save-vectors
 uv run modal run reconstruct_scores.py --dataset biosbias --save-vectors
+uv run modal run reconstruct_scores.py --dataset mmlu --save-vectors
 
-# Both datasets in one command
+# All datasets in one command
 uv run modal run reconstruct_scores.py --all-datasets --save-vectors
 ```
 
@@ -202,8 +229,9 @@ Raw cosine scores (pairwise and fidelity) will be near 0.99. This is expected. S
 # Single dataset
 uv run python scripts/pull_from_modal.py --dataset prism
 uv run python scripts/pull_from_modal.py --dataset biosbias
+uv run python scripts/pull_from_modal.py --dataset mmlu
 
-# Both datasets
+# All datasets
 uv run python scripts/pull_from_modal.py --all-datasets
 
 # Subset of artifact types
@@ -221,6 +249,9 @@ If a pull fails: `modal volume ls nla-cache` to inspect the volume.
 After pulling artifacts to `data/`, run any of the following scripts. The diagnostic scripts accept `--activations` and `--recon-vectors` paths; defaults shown below assume the standard artifact names.
 
 ```bash
+# Cross-dataset activation similarity (PRISM vs BiosBias)
+uv run python scripts/compare_benchmark_activations.py
+
 # Full pairwise cosine similarity matrix: raw and mean-centered
 uv run python scripts/activation_cosine_matrix.py \
   --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet
@@ -254,6 +285,20 @@ uv run python scripts/diagnose_reconstruction_consistency.py \
 uv run python scripts/diagnose_reconstruction_consistency.py \
   --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
   --recon-vectors data/recon_vectors_biosbias.parquet
+
+uv run python scripts/activation_cosine_matrix.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
+
+uv run python scripts/diagnose_cosine_inflation.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
+
+uv run python scripts/diagnose_reconstruction_fidelity.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
+  --recon-vectors data/recon_vectors_mmlu.parquet
+
+uv run python scripts/diagnose_reconstruction_consistency.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
+  --recon-vectors data/recon_vectors_mmlu.parquet
 ```
 
 ---
@@ -312,6 +357,17 @@ uv run python scripts/make_report_tables.py \
 | `fidelity_scores_biosbias.parquet` | Per-reconstruction fidelity cosine scores (4,800 rows) |
 | `recon_vectors_biosbias.parquet` | Raw reconstructed vectors (4,800 rows × 3840-d); written only with `--save-vectors` |
 
+### MMLU
+
+| Path | What it is |
+|------|------------|
+| `mmlu_400.csv` | 400 MMLU items with `item_idx`, `dataset`, `prompt_text`, `subject`, `question`, `choices` (JSON), `answer`, `split` |
+| `activations_layer32_mmlu_gemma-3-12b-pt.parquet` | MMLU activation vectors (layer 32, last token before "Answer:", L2-normalized) |
+| `descriptions_mmlu.parquet` | `activation_idx`, `sample_idx`, `description` (4,800 rows) |
+| `pairwise_consistency_mmlu.parquet` | Within-activation recon-recon cosine scores (26,400 rows) |
+| `fidelity_scores_mmlu.parquet` | Per-reconstruction fidelity cosine scores (4,800 rows) |
+| `recon_vectors_mmlu.parquet` | Raw reconstructed vectors (4,800 rows × 3840-d); written only with `--save-vectors` |
+
 | `hf/` | Cached model weights (reuse across runs) |
 
 ---
@@ -323,7 +379,7 @@ uv sync && uv run modal setup
 # Set HF token once:
 modal secret create --force huggingface HF_TOKEN=<your_hf_token>
 
-# Run all three steps for both datasets
+# Run all three steps for all three datasets
 uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
 uv run modal run sample_descriptions.py --all-datasets --n-samples 12
 uv run modal run reconstruct_scores.py --all-datasets --save-vectors
@@ -349,6 +405,15 @@ uv run python scripts/diagnose_reconstruction_fidelity.py \
 uv run python scripts/diagnose_reconstruction_consistency.py \
   --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
   --recon-vectors data/recon_vectors_biosbias.parquet
+
+uv run python scripts/diagnose_cosine_inflation.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
+uv run python scripts/diagnose_reconstruction_fidelity.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
+  --recon-vectors data/recon_vectors_mmlu.parquet
+uv run python scripts/diagnose_reconstruction_consistency.py \
+  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
+  --recon-vectors data/recon_vectors_mmlu.parquet
 ```
 
 **Check you're done — per dataset:**
@@ -367,10 +432,16 @@ uv run python scripts/diagnose_reconstruction_consistency.py \
 | `data/pairwise_consistency_biosbias.parquet` | 26,400 rows (400 × 66), no NaNs |
 | `data/fidelity_scores_biosbias.parquet` | 4,800 rows, no NaNs |
 | `data/recon_vectors_biosbias.parquet` | 4,800 rows (if `--save-vectors`) |
+| `data/mmlu_400.csv` | 400 rows |
+| `data/activations_layer32_mmlu_gemma-3-12b-pt.parquet` | 400 rows |
+| `data/descriptions_mmlu.parquet` | 4,800 rows (400 × 12) |
+| `data/pairwise_consistency_mmlu.parquet` | 26,400 rows (400 × 66), no NaNs |
+| `data/fidelity_scores_mmlu.parquet` | 4,800 rows, no NaNs |
+| `data/recon_vectors_mmlu.parquet` | 4,800 rows (if `--save-vectors`) |
 
 Raw cosine scores near 0.99 are expected — see [Evaluation metrics](#evaluation-metrics) for how to interpret them using baseline-adjusted centered gaps.
 
 **Cross-dataset totals:**
-- 9,600 description rows (4,800 per dataset)
-- 52,800 pairwise consistency rows (26,400 per dataset)
-- 9,600 fidelity rows (4,800 per dataset)
+- 14,400 description rows (4,800 per dataset)
+- 79,200 pairwise consistency rows (26,400 per dataset)
+- 14,400 fidelity rows (4,800 per dataset)

@@ -48,6 +48,10 @@ def recon_vectors_filename(dataset: str) -> str:
     return f"recon_vectors_{dataset}.parquet"
 
 
+def text_consistency_mpnet_filename(dataset: str) -> str:
+    return f"text_consistency_mpnet_{dataset}.parquet"
+
+
 # ── Modal volume paths (/cache/...) ───────────────────────────────────────────
 
 def volume_csv_path(dataset: str, n: int) -> str:
@@ -112,6 +116,10 @@ def local_recon_vectors_path(dataset: str) -> Path:
     return DATA_DIR / recon_vectors_filename(dataset)
 
 
+def local_text_consistency_mpnet_path(dataset: str) -> Path:
+    return DATA_DIR / text_consistency_mpnet_filename(dataset)
+
+
 # ── Legacy constants (used by nla/activation_utils.py and train_linear_probes.py) ──
 
 _LEGACY_LAYER = 32
@@ -119,6 +127,7 @@ _LEGACY_MODEL = "google/gemma-3-12b-pt"
 
 DEFAULT_CSV = DATA_DIR / "selfdescribe_400.csv"
 DEFAULT_DESCRIPTIONS = DATA_DIR / "descriptions.parquet"
+DEFAULT_TEXT_CONSISTENCY_MPNET = DATA_DIR / "text_consistency_mpnet.parquet"
 DEFAULT_ACTIVATIONS_PERSONA = (
     DATA_DIR / f"activations_layer{_LEGACY_LAYER}_persona-only_{_model_slug(_LEGACY_MODEL)}.parquet"
 )

@@ -21,18 +21,27 @@ def model_slug(model_id: str) -> str:
     return model_id.replace("google/", "").replace(".", "-")
 
 
-def activations_basename(layer: int, prompt_mode: str, model_id: str) -> str:
-    return f"activations_layer{layer}_{prompt_mode}_{model_slug(model_id)}.parquet"
+def activations_basename(
+    layer: int, prompt_mode: str, model_id: str, *, dataset_tag: str = ""
+) -> str:
+    tag = f"_{dataset_tag}" if dataset_tag else ""
+    return f"activations_layer{layer}_{prompt_mode}{tag}_{model_slug(model_id)}.parquet"
 
 
 def output_paths(
-    cache_dir: str, layer: int, prompt_mode: str, model_id: str
+    cache_dir: str,
+    layer: int,
+    prompt_mode: str,
+    model_id: str,
+    *,
+    dataset_tag: str = "",
 ) -> tuple[str, str]:
     if prompt_mode not in PROMPT_MODES:
         raise ValueError(
             f"prompt_mode {prompt_mode!r} not in {sorted(PROMPT_MODES)}"
         )
-    base = f"activations_layer{layer}_{prompt_mode}_{model_slug(model_id)}"
+    tag = f"_{dataset_tag}" if dataset_tag else ""
+    base = f"activations_layer{layer}_{prompt_mode}{tag}_{model_slug(model_id)}"
     return f"{cache_dir}/{base}.parquet", f"{cache_dir}/{base}.npy"
 
 

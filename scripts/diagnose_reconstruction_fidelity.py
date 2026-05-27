@@ -44,12 +44,12 @@ Prerequisites
 --------------
 1. Original activation vectors in data/:
      modal volume get nla-cache \\
-       activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
-       data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet
+       activations_layer32_prism_gemma-3-12b-pt.parquet \\
+       data/activations_layer32_prism_gemma-3-12b-pt.parquet
 
 2. Reconstructed vectors (requires re-running Step 3 with --save-vectors):
      uv run modal run reconstruct_scores.py \\
-       --activations activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
+       --activations activations_layer32_prism_gemma-3-12b-pt.parquet \\
        --descriptions descriptions_prism.parquet \\
        --pairwise-out pairwise_consistency_prism.parquet \\
        --fidelity-out fidelity_scores_prism.parquet \\
@@ -61,7 +61,7 @@ Prerequisites
 Run:
   uv run python scripts/diagnose_reconstruction_fidelity.py
   uv run python scripts/diagnose_reconstruction_fidelity.py \\
-    --activations data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
+    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
     --recon-vectors data/recon_vectors_prism.parquet \\
     --n-mismatch 5 --seed 42
 """
@@ -79,7 +79,7 @@ sys.path.insert(0, str(ROOT))
 
 DATA = ROOT / "data"
 
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet"
+DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
 DEFAULT_RECON_VECTORS = DATA / "recon_vectors_prism.parquet"
 DEFAULT_N_MISMATCH = 5
 DEFAULT_SEED = 42
@@ -157,7 +157,7 @@ def main() -> None:
             print()
             print("Re-run Step 3 with --save-vectors to generate reconstructed vectors:")
             print("  uv run modal run reconstruct_scores.py \\")
-            print("    --activations activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\")
+            print("    --activations activations_layer32_prism_gemma-3-12b-pt.parquet \\")
             print("    --descriptions descriptions_prism.parquet \\")
             print("    --pairwise-out pairwise_consistency_prism.parquet \\")
             print("    --fidelity-out fidelity_scores_prism.parquet \\")

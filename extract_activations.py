@@ -1,17 +1,24 @@
 """Step 1: extract layer-32 residual activations from Gemma-3-12B on Modal.
 
-Samples 400 rows from Transluce/SelfDescribe-Llama-3.1-8B-Instruct (shuffle seed 42).
+Supported datasets (--dataset):
+  prism     — Transluce/PRISM-gender-Llama-3.1-8B-Instruct
+              Samples n_items rows (default 400, seed 42).
+              CSV: /cache/prism_400.csv
+              Activations: /cache/activations_layer32_prism_gemma-3-12b-pt.parquet
 
-Prompt modes (--prompt-mode; default persona-only):
-  persona-only — strip INFOBOX_SUFFIX, last-token on persona text (default)
-  full         — entire user_prompt; pass --full or --prompt-mode full (writes legacy parquet)
+  biosbias  — LabHC/bias_in_bios
+              Samples n_items rows (default 400, seed 42), stratified 50/50 by gender.
+              Gender indicators are scrubbed from bio text before extraction.
+              CSV: /cache/biosbias_400.csv
+              Activations: /cache/activations_layer32_biosbias_gemma-3-12b-pt.parquet
 
 Run:
-  uv run modal run extract_activations.py
-  uv run modal run extract_activations.py --full
+  uv run modal run extract_activations.py --dataset prism
+  uv run modal run extract_activations.py --dataset biosbias
+  uv run modal run extract_activations.py --all-datasets
+  uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
 """
 
-import shutil
 from pathlib import Path
 
 import modal
@@ -22,20 +29,15 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DEFAULT_MODEL_ID = "google/gemma-3-12b-pt"
 LAYER = 32
-BATCH_SIZE = 8  # 12B on A100; lower if OOM
-SELF_DESCRIBE_DATASET = "Transluce/SelfDescribe-Llama-3.1-8B-Instruct"
-N_PROMPTS = 400
-SAMPLE_SEED = 42
+BATCH_SIZE = 4  # conservative for long PRISM sequences; safe for BiasBios too
 
 CACHE = "/cache"
 HF_CACHE = f"{CACHE}/hf"
 HF_HUB_CACHE = f"{HF_CACHE}/hub"
-CSV_PATH = f"{CACHE}/selfdescribe_400.csv"
 
 app = modal.App("nla-extract")
 vol = modal.Volume.from_name("nla-cache", create_if_missing=True)
@@ -72,28 +74,11 @@ def hf_token() -> str:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
         raise RuntimeError(
-            "HF_TOKEN missing in container. Overwrite secret:\n"
+            "HF_TOKEN missing in container. Set it with:\n"
             "  modal secret create --force huggingface HF_TOKEN=<token>"
         )
     os.environ["HF_TOKEN"] = token
     return token
-
-
-def ensure_csv(volume: modal.Volume) -> int:
-    if Path(CSV_PATH).exists():
-        n = len(pd.read_csv(CSV_PATH))
-        if n == N_PROMPTS:
-            print(f"using existing CSV ({n} rows) -> {CSV_PATH}")
-            return n
-        print(f"regenerating CSV ({n} != {N_PROMPTS} rows)")
-    ds = load_dataset(SELF_DESCRIBE_DATASET, split="train", token=hf_token())
-    ds = ds.shuffle(seed=SAMPLE_SEED).select(range(N_PROMPTS))
-    df = ds.to_pandas()[["user_prompt", "attr_class", "attr"]]
-    assert len(df) == N_PROMPTS
-    df.to_csv(CSV_PATH, index=False)
-    volume.commit()
-    print(f"wrote {len(df)} rows -> {CSV_PATH}")
-    return len(df)
 
 
 def load_model(model_id: str):
@@ -106,9 +91,8 @@ def load_model(model_id: str):
     except HfHubHTTPError as e:
         if e.response.status_code == 403:
             raise RuntimeError(
-                "HF 403: token cannot access gated repos. At huggingface.co/settings/tokens "
-                "use a classic Read token, or enable 'Read access to public gated repos' "
-                "on your fine-grained token. Also accept the license on the model page."
+                "HF 403: token cannot access gated repos. Accept the license on the model "
+                "page and use a classic Read token or enable gated-repo access."
             ) from e
         raise
     print(f"model cache: {model_dir}")
@@ -141,13 +125,6 @@ def load_model(model_id: str):
     return model, tokenizer
 
 
-def read_prompts(path: str) -> list[str]:
-    df = pd.read_csv(path)
-    if len(df) == 0:
-        raise ValueError(f"empty CSV at {path}")
-    return df["user_prompt"].tolist()
-
-
 def extract_activations(model, tokenizer, prompts: list[str], layer: int) -> np.ndarray:
     device = model.get_input_embeddings().weight.device
     all_vecs = []
@@ -165,7 +142,9 @@ def extract_activations(model, tokenizer, prompts: list[str], layer: int) -> np.
             input_ids = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
-            out = model(
+            # Call model.model (backbone) directly to skip the lm_head projection,
+            # which would allocate ~3.5 GiB and OOM on long PRISM sequences.
+            out = model.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
@@ -186,14 +165,6 @@ def l2_normalize(x: np.ndarray) -> np.ndarray:
     return x / norms
 
 
-def _write_activations(
-    acts: np.ndarray, parquet_path: str, npy_path: str
-) -> None:
-    np.save(npy_path, acts)
-    table = pa.table({"activation_vector": acts.tolist()})
-    pq.write_table(table, parquet_path)
-
-
 @app.function(
     image=image,
     gpu="A100",
@@ -202,64 +173,101 @@ def _write_activations(
     secrets=[modal.Secret.from_name("huggingface")],
 )
 def run(
-    prompt_mode: str = "persona-only",
+    dataset: str,
+    n_items: int,
+    seed: int,
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
     import sys
 
     sys.path.insert(0, "/root")
-    from nla.prompt_modes import (
-        LEGACY_NPY,
-        LEGACY_PARQUET,
-        output_paths,
-        prepare_prompts,
+    from nla.datasets import load_dataset_items
+    from nla.paths import (
+        activations_filename,
+        csv_filename,
+        volume_activations_path,
+        volume_csv_path,
     )
 
     vol.reload()
     setup_hf_cache()
 
-    n_rows = ensure_csv(vol)
-    raw_prompts = read_prompts(CSV_PATH)
-    assert len(raw_prompts) == n_rows
-    prompts, missing_suffix = prepare_prompts(raw_prompts, prompt_mode)
+    token = hf_token()
+    print(f"dataset={dataset}  n_items={n_items}  seed={seed}  layer={layer}")
 
-    parquet_path, npy_path = output_paths(CACHE, layer, prompt_mode, model_id)
-    print(f"prompt_mode={prompt_mode} model_id={model_id} layer={layer}")
-    print(f"output parquet -> {parquet_path}")
+    # ── Load / build dataset CSV ───────────────────────────────────────────────
+    csv_path = volume_csv_path(dataset, n_items)
+    if Path(csv_path).exists():
+        existing = pd.read_csv(csv_path)
+        if len(existing) == n_items:
+            print(f"using existing CSV ({n_items} rows) -> {csv_path}")
+            df = existing
+        else:
+            print(f"CSV row count mismatch ({len(existing)} != {n_items}); regenerating")
+            df = None
+    else:
+        df = None
+
+    if df is None:
+        df = load_dataset_items(dataset, n_items=n_items, seed=seed, hf_token=token)
+        assert len(df) == n_items
+        df.to_csv(csv_path, index=False)
+        vol.commit()
+        print(f"wrote {n_items} rows -> {csv_path}")
+
+    # ── Extract activations ────────────────────────────────────────────────────
+    prompts: list[str] = df["prompt_text"].tolist()
+    assert len(prompts) == n_items
+
+    parquet_path = volume_activations_path(dataset, layer, model_id)
+    print(f"output -> {parquet_path}")
 
     model, tokenizer = load_model(model_id)
     vol.commit()
 
     acts = extract_activations(model, tokenizer, prompts, layer)
     acts = l2_normalize(acts).astype(np.float32)
-    _write_activations(acts, parquet_path, npy_path)
 
-    if prompt_mode == "full":
-        legacy_parquet = f"{CACHE}/{LEGACY_PARQUET}"
-        legacy_npy = f"{CACHE}/{LEGACY_NPY}"
-        shutil.copy2(parquet_path, legacy_parquet)
-        shutil.copy2(npy_path, legacy_npy)
-        print(f"legacy copy -> {legacy_parquet}")
-        print(f"legacy copy -> {legacy_npy}")
+    assert acts.shape[0] == n_items, f"Expected {n_items} activations, got {acts.shape[0]}"
 
+    table = pa.table({"activation_vector": acts.tolist()})
+    pq.write_table(table, parquet_path)
     vol.commit()
 
     norms = np.linalg.norm(acts, axis=1)
-    print(f"shape: {acts.shape}")
-    print(f"mean norm: {norms.mean():.6f}")
-    print(f"suffix missing on {len(missing_suffix)} row(s)")
-    print(f"saved -> {npy_path}")
-    print(f"saved -> {parquet_path}")
+    print(f"shape:      {acts.shape}")
+    print(f"mean norm:  {norms.mean():.6f}")
+    print(f"saved ->    {parquet_path}")
 
 
 @app.local_entrypoint()
 def main(
-    prompt_mode: str = "persona-only",
-    full: bool = False,
+    dataset: str = "prism",
+    all_datasets: bool = False,
+    n_items: int = 400,
+    seed: int = 42,
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
-    if full:
-        prompt_mode = "full"
-    run.remote(prompt_mode=prompt_mode, model_id=model_id, layer=layer)
+    """
+    --dataset       prism | biosbias  (default: prism)
+    --all-datasets  run both prism and biosbias in sequence
+    --n-items       items to sample per dataset (default: 400)
+    --seed          shuffle seed (default: 42)
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from nla.datasets import SUPPORTED_DATASETS
+
+    datasets = SUPPORTED_DATASETS if all_datasets else [dataset]
+    for ds in datasets:
+        print(f"\n=== Extracting activations: {ds} (n_items={n_items}, seed={seed}) ===")
+        run.remote(
+            dataset=ds,
+            n_items=n_items,
+            seed=seed,
+            model_id=model_id,
+            layer=layer,
+        )

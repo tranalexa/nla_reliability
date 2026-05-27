@@ -60,7 +60,7 @@ sys.path.insert(0, str(ROOT))
 DATA = ROOT / "data"
 
 # ── defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet"
+DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
 DEFAULT_PAIRWISE = DATA / "pairwise_consistency_prism.parquet"
 DEFAULT_FIDELITY = DATA / "fidelity_scores_prism.parquet"
 DEFAULT_N_PAIRS = 5000

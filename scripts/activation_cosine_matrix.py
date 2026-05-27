@@ -7,7 +7,7 @@ Run:
   uv run python scripts/activation_cosine_matrix.py
   uv run python scripts/activation_cosine_matrix.py --save
   uv run python scripts/activation_cosine_matrix.py \\
-    --activations data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
+    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
     --save
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet"
+DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
 
 
 def off_diagonal(M: np.ndarray) -> np.ndarray:

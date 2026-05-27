@@ -1,15 +1,17 @@
-"""Sample AV descriptions and write them beside the matching SelfDescribe prompt.
+"""Preview AV descriptions alongside the matching prompt text.
 
-Defaults expect artifacts in data/ (pull with scripts/pull_from_modal.py):
-  data/descriptions.parquet
-  data/selfdescribe_400.csv
+Reads descriptions and item CSV from data/ (pull with scripts/pull_from_modal.py).
 
 Usage:
-  uv run python scripts/preview_descriptions.py
-  uv run python scripts/preview_descriptions.py -n 10 -o scripts/description_preview.txt
-  uv run python scripts/preview_descriptions.py --activations-source persona-only
+  uv run python scripts/preview_descriptions.py --dataset prism
+  uv run python scripts/preview_descriptions.py --dataset biosbias
+  uv run python scripts/preview_descriptions.py --dataset prism -n 10
+  uv run python scripts/preview_descriptions.py \\
+    --descriptions data/descriptions_prism.parquet \\
+    --prompts data/prism_400.csv
 """
 
+import argparse
 from pathlib import Path
 import sys
 
@@ -18,129 +20,123 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from nla.paths import DEFAULT_CSV, DEFAULT_DESCRIPTIONS  # noqa: E402
-from nla.prompt_modes import INFOBOX_SUFFIX, apply_prompt_mode  # noqa: E402
+from nla.paths import (  # noqa: E402
+    DATA_DIR,
+    local_csv_path,
+    local_descriptions_path,
+)
 
-DEFAULT_PROMPTS = DEFAULT_CSV
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "description_preview.txt"
+DEFAULT_N_ITEMS = 400
 
 
 def load_merged(descriptions_path: Path, prompts_path: Path) -> pd.DataFrame:
     descs = pd.read_parquet(descriptions_path)
     prompts = pd.read_csv(prompts_path)
-    prompts = prompts.reset_index().rename(columns={"index": "activation_idx"})
+
+    # item_idx (new schema) or falling back to row index
+    if "item_idx" in prompts.columns:
+        prompts = prompts.rename(columns={"item_idx": "activation_idx"})
+    else:
+        prompts = prompts.reset_index().rename(columns={"index": "activation_idx"})
+
+    # Keep prompt_text (new schema) or user_prompt (legacy)
+    prompt_col = "prompt_text" if "prompt_text" in prompts.columns else "user_prompt"
+    keep_cols = ["activation_idx", prompt_col] + [
+        c for c in prompts.columns if c not in ("activation_idx", prompt_col)
+    ]
     merged = descs.merge(
-        prompts[["activation_idx", "user_prompt", "attr_class", "attr"]],
+        prompts[keep_cols],
         on="activation_idx",
         how="left",
         validate="many_to_one",
     )
-    missing = merged["user_prompt"].isna().sum()
+    missing = merged[prompt_col].isna().sum()
     if missing:
-        raise ValueError(f"{missing} descriptions have no matching SelfDescribe row")
-    persona_texts = []
-    for p in merged["user_prompt"]:
-        text, _ = apply_prompt_mode(str(p), "persona-only")
-        persona_texts.append(text)
-    merged["persona_prompt"] = persona_texts
+        raise ValueError(f"{missing} descriptions have no matching prompt row")
+    merged["_prompt_text"] = merged[prompt_col]
     return merged
 
 
-def format_block(row: pd.Series, *, show_full_prompt: bool) -> str:
+def format_block(row: pd.Series) -> str:
+    meta_cols = [c for c in row.index if c not in
+                 ("activation_idx", "sample_idx", "description", "_prompt_text")]
+    meta_parts = "  |  ".join(f"{c}: {row[c]}" for c in meta_cols if pd.notna(row.get(c)))
     lines = [
         "=" * 72,
         f"activation_idx: {row.activation_idx}  |  sample_idx: {row.sample_idx}",
-        f"attr_class: {row.attr_class}  |  attr: {row.attr}",
-        "-" * 72,
-        "Persona text (what Step 1 persona-only mode forwards; AV never sees this):",
-        str(row.persona_prompt),
     ]
-    if show_full_prompt:
-        lines.extend(
-            [
-                "-" * 72,
-                "Full CSV user_prompt (includes infobox suffix):",
-                str(row.user_prompt),
-            ]
-        )
-    else:
-        lines.append(
-            f"(Full CSV still ends with infobox suffix; stripped for extraction only.)"
-        )
-    lines.extend(
-        [
-            "-" * 72,
-            "AV description (from injected activation only):",
-            str(row.description),
-            "",
-        ]
-    )
+    if meta_parts:
+        lines.append(meta_parts)
+    lines.extend([
+        "-" * 72,
+        "Prompt text (input to Gemma for activation extraction):",
+        str(row._prompt_text),
+        "-" * 72,
+        "AV description (from injected activation vector only):",
+        str(row.description),
+        "",
+    ])
     return "\n".join(lines)
 
 
-def main(
-    descriptions_path: Path = DEFAULT_DESCRIPTIONS,
-    prompts_path: Path = DEFAULT_PROMPTS,
-    output_path: Path = DEFAULT_OUTPUT,
-    n: int = 10,
-    seed: int = 0,
-    activations_source: str = "persona-only",
-    show_full_prompt: bool = False,
-) -> None:
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--dataset",
+        default="prism",
+        help="dataset name for default path inference (default: prism)",
+    )
+    p.add_argument(
+        "--descriptions",
+        type=Path,
+        default=None,
+        help="path to descriptions parquet (default: inferred from --dataset)",
+    )
+    p.add_argument(
+        "--prompts",
+        type=Path,
+        default=None,
+        help="path to items CSV (default: inferred from --dataset)",
+    )
+    p.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
+    p.add_argument("-n", type=int, default=10, help="description rows to sample (default: 10)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--n-items", type=int, default=DEFAULT_N_ITEMS,
+                   help="items count used in Step 1 (for CSV filename, default: 400)")
+    args = p.parse_args()
+
+    descriptions_path = args.descriptions or local_descriptions_path(args.dataset)
+    prompts_path = args.prompts or local_csv_path(args.dataset, args.n_items)
+
+    if not descriptions_path.exists():
+        print(f"ERROR: {descriptions_path} not found. Pull it first:")
+        print(f"  uv run python scripts/pull_from_modal.py --dataset {args.dataset}")
+        sys.exit(1)
+    if not prompts_path.exists():
+        print(f"ERROR: {prompts_path} not found. Pull it first:")
+        print(f"  uv run python scripts/pull_from_modal.py --dataset {args.dataset}")
+        sys.exit(1)
+
     merged = load_merged(descriptions_path, prompts_path)
-    n = min(n, len(merged))
-    sample = merged.sample(n=n, random_state=seed).sort_values(
+    n = min(args.n, len(merged))
+    sample = merged.sample(n=n, random_state=args.seed).sort_values(
         ["activation_idx", "sample_idx"]
     )
 
-    source_line = (
-        f"activations source (Step 2): {activations_source}\n"
-        if activations_source
-        else ""
-    )
     header = (
-        f"NLA description preview ({n} samples, seed={seed})\n"
+        f"NLA description preview ({n} samples, seed={args.seed})\n"
+        f"dataset:      {args.dataset}\n"
         f"descriptions: {descriptions_path}\n"
-        f"prompts: {prompts_path}\n"
-        f"total descriptions in file: {len(merged)}\n"
-        f"{source_line}"
-        f"infobox suffix (not shown in persona text): {INFOBOX_SUFFIX!r}\n"
+        f"prompts:      {prompts_path}\n"
+        f"total rows:   {len(merged)}\n"
     )
-
-    body = "\n".join(
-        format_block(row, show_full_prompt=show_full_prompt) for _, row in sample.iterrows()
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(header + "\n" + body, encoding="utf-8")
-    print(f"wrote {n} entries -> {output_path}")
+    body = "\n".join(format_block(row) for _, row in sample.iterrows())
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(header + "\n" + body, encoding="utf-8")
+    print(f"wrote {n} entries -> {args.output}")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--descriptions", type=Path, default=DEFAULT_DESCRIPTIONS)
-    p.add_argument("--prompts", type=Path, default=DEFAULT_PROMPTS)
-    p.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
-    p.add_argument("-n", type=int, default=10, help="number of description rows to sample")
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument(
-        "--activations-source",
-        default="",
-        help="label for which Step 1/2 activations produced descriptions (e.g. persona-only)",
-    )
-    p.add_argument(
-        "--show-full-prompt",
-        action="store_true",
-        help="also print full CSV user_prompt including Wikipedia infobox suffix",
-    )
-    args = p.parse_args()
-    main(
-        descriptions_path=args.descriptions,
-        prompts_path=args.prompts,
-        output_path=args.output,
-        n=args.n,
-        seed=args.seed,
-        activations_source=args.activations_source,
-        show_full_prompt=args.show_full_prompt,
-    )
+    main()

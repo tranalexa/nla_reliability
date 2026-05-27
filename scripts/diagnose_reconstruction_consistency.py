@@ -39,7 +39,7 @@ Gap distribution:       N = 26 400 (each within pair is matched to exactly
 Run:
   uv run python scripts/diagnose_reconstruction_consistency.py
   uv run python scripts/diagnose_reconstruction_consistency.py \\
-    --activations data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
+    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
     --recon-vectors data/recon_vectors_prism.parquet \\
     --n-between 5 --seed 42
 """
@@ -57,7 +57,7 @@ sys.path.insert(0, str(ROOT))
 
 DATA = ROOT / "data"
 
-DEFAULT_ACTIVATIONS   = DATA / "activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet"
+DEFAULT_ACTIVATIONS   = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
 DEFAULT_RECON_VECTORS = DATA / "recon_vectors_prism.parquet"
 DEFAULT_N_BETWEEN     = 5
 DEFAULT_SEED          = 42

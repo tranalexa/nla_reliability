@@ -16,6 +16,7 @@ dependencies = [
     "datasets>=4.8.5",
     "httpx>=0.28.1",
     "huggingface-hub>=1.16.1",
+    "matplotlib>=3.9",
     "modal>=0.73",
     "numpy>=2.4.6",
     "orjson>=3.11.9",

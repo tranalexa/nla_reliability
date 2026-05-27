@@ -1,0 +1,20 @@
+\begin{table}[ht]
+\centering
+\caption{NLA reliability results (PRISM, Bias in Bios, MMLU). Metrics are mean-centered cosine similarities (mean $\pm$ std, $n{=}400$ items). Higher gap $\uparrow$ indicates stronger reliability.}
+\label{tab:nla_reliability}
+\begin{tabular}{lccc}
+\toprule
+Metric & PRISM & Bias in Bios & MMLU \\
+\midrule
+Centered fidelity (matched) & 0.667 $\pm$ 0.137 & 0.647 $\pm$ 0.099 & 0.238 $\pm$ 0.148 \\
+Centered fidelity (mismatched) & -0.007 $\pm$ 0.118 & 0.001 $\pm$ 0.170 & -0.015 $\pm$ 0.129 \\
+\textbf{Centered fidelity gap} $\uparrow$ & 0.675 $\pm$ 0.187 & 0.646 $\pm$ 0.199 & 0.253 $\pm$ 0.204 \\
+\midrule
+Centered consistency (within-item) & 0.953 $\pm$ 0.029 & 0.951 $\pm$ 0.024 & 0.924 $\pm$ 0.038 \\
+Centered consistency (between-item) & 0.146 $\pm$ 0.134 & 0.158 $\pm$ 0.226 & 0.651 $\pm$ 0.142 \\
+\textbf{Centered consistency gap} $\uparrow$ & 0.808 $\pm$ 0.136 & 0.793 $\pm$ 0.228 & 0.273 $\pm$ 0.146 \\
+\midrule
+$\|\mu\|$ (mean activation norm) & 0.991 $\pm$ 0.000 & 0.990 $\pm$ 0.000 & 0.997 $\pm$ 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}

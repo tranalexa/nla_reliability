@@ -1,0 +1,9 @@
+dataset,target,vector_source,n,n_classes,train_n,test_n,majority_acc,probe_acc
+prism,gender,original,400,3,320,80,0.575,0.575
+prism,gender,recon,400,3,320,80,0.575,0.575
+biosbias,profession,original,400,26,320,80,0.2625,0.3
+biosbias,gender,original,400,2,320,80,0.5,0.55
+biosbias,profession,recon,400,26,320,80,0.2625,0.2625
+biosbias,gender,recon,400,2,320,80,0.5,0.5875
+mmlu,subject,original,400,4,320,80,0.25,0.9625
+mmlu,subject,recon,400,4,320,80,0.25,0.7625

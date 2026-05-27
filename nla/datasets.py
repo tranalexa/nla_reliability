@@ -180,13 +180,9 @@ MMLU_SUBJECTS = ["abstract_algebra", "moral_scenarios", "virology", "astronomy"]
 _MMLU_SPLIT_PREFERENCE = ("test", "validation")
 
 
-def _format_mmlu_prompt(question: str, choices: list) -> str:
-    parts = [f"Question: {question}", ""]
-    for letter, choice in zip("ABCD", choices):
-        parts.append(f"{letter}. {choice}")
-    parts.append("")
-    parts.append("Answer:")
-    return "\n".join(parts)
+def _format_mmlu_prompt(question: str) -> str:
+    """Question stem only (no A–D choices). Choices stay in CSV metadata."""
+    return question.strip()
 
 
 def _mmlu_valid_indices(ds) -> list[int]:
@@ -267,7 +263,7 @@ def _load_mmlu(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.Da
                     "choices": json.dumps(record["choices"]),
                     "answer": int(record["answer"]),
                     "split": used_split,
-                    "prompt_text": _format_mmlu_prompt(record["question"], record["choices"]),
+                    "prompt_text": _format_mmlu_prompt(record["question"]),
                 }
             )
 

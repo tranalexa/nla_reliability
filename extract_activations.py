@@ -15,7 +15,7 @@ Supported datasets (--dataset):
   mmlu      — cais/mmlu
               Samples 4 subjects × 100 questions = 400 items (seed 42).
               Subjects: abstract_algebra, moral_scenarios, virology, astronomy.
-              Prompt format: "Question: ...\nA. ...\nB. ...\nC. ...\nD. ...\nAnswer:"
+              Prompt format: question stem only (choices in CSV metadata, not in prompt_text)
               CSV: /cache/mmlu_400.csv
               Activations: /cache/activations_layer32_mmlu_gemma-3-12b-pt.parquet
 

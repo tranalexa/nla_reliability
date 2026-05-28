@@ -25,7 +25,7 @@ def _tentative_flatten(record: dict) -> tuple[str | None, str | None, str | None
 
     Returns (flattened_text, gt_attr_value, predicted_attr_value).
     Any element may be None if the field is not found — the caller prints the
-    raw record so you can identify the real names and update dataset_adapters.py.
+    raw record so you can identify the real names and update ``nla/datasets.py``.
 
     gt_attr is the survey ground-truth gender written to the CSV attr column.
     predicted_attr is the model-predicted gender (attr in the source dataset),
@@ -96,7 +96,7 @@ def main() -> None:
         print(f"--- flattened user_prompt (what goes into the CSV) ---")
         if flat is None:
             print("  ERROR: could not find conversation field — inspect keys above and update")
-            print("         nla/dataset_adapters.py _flatten_prism_conversation() accordingly.")
+            print("         nla/datasets.py _flatten_prism_conversation() accordingly.")
         else:
             limit = len(flat) if args.no_truncate else 600
             print(flat[:limit])

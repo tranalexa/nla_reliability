@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-"""Compare raw cosine similarity across PRISM, BiosBias, and MMLU activation spaces.
+"""Compare raw cosine similarity across canonical activation spaces.
+
+For each pair of run_ids (and within each run), reports the mean raw cosine
+similarity of the layer-32 activation vectors. Useful for confirming the
+"shared mean direction" inflation diagnostic at the dataset level.
 
 Usage:
   uv run python scripts/compare_benchmark_activations.py
+  uv run python scripts/compare_benchmark_activations.py --run-ids prism biosbias
 """
+from __future__ import annotations
+
+import argparse
+import sys
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-DATA = Path(__file__).resolve().parents[1] / "data"
-PRISM_PATH    = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
-BIOSBIAS_PATH = DATA / "activations_layer32_biosbias_gemma-3-12b-pt.parquet"
-MMLU_PATH     = DATA / "activations_layer32_mmlu_gemma-3-12b-pt.parquet"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from nla.paths import RUN_IDS, local_activations_path, validate_run_id  # noqa: E402
 
 
 def load(path: Path) -> np.ndarray:
@@ -24,20 +34,41 @@ def mean_cosine(A: np.ndarray, B: np.ndarray, exclude_diagonal: bool = False) ->
     """Mean pairwise cosine similarity between rows of A and rows of B."""
     A = A / np.linalg.norm(A, axis=1, keepdims=True)
     B = B / np.linalg.norm(B, axis=1, keepdims=True)
-    cos = A @ B.T  # (n_A, n_B)
+    cos = A @ B.T
     if exclude_diagonal:
         np.fill_diagonal(cos, np.nan)
     return float(np.nanmean(cos))
 
 
-P = load(PRISM_PATH)
-B = load(BIOSBIAS_PATH)
-M = load(MMLU_PATH)
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--run-ids", nargs="+", default=list(RUN_IDS),
+                   help="run_ids to compare (default: all four canonical runs)")
+    args = p.parse_args()
 
-print(f"PRISM within mean cosine:          {mean_cosine(P, P, exclude_diagonal=True):.6f}")
-print(f"BiosBias within mean cosine:       {mean_cosine(B, B, exclude_diagonal=True):.6f}")
-print(f"MMLU within mean cosine:           {mean_cosine(M, M, exclude_diagonal=True):.6f}")
-print()
-print(f"PRISM-BiosBias mean cosine:        {mean_cosine(P, B):.6f}")
-print(f"PRISM-MMLU mean cosine:            {mean_cosine(P, M):.6f}")
-print(f"BiosBias-MMLU mean cosine:         {mean_cosine(B, M):.6f}")
+    for rid in args.run_ids:
+        validate_run_id(rid)
+
+    mats: dict[str, np.ndarray] = {}
+    for rid in args.run_ids:
+        path = local_activations_path(rid)
+        if not path.exists():
+            print(f"WARN: skipping {rid} ({path} missing)")
+            continue
+        mats[rid] = load(path)
+        print(f"{rid:14s} n={mats[rid].shape[0]:4d} d={mats[rid].shape[1]}")
+
+    print()
+    print("== within-run mean cosine (off-diagonal) ==")
+    for rid, M in mats.items():
+        print(f"  {rid:14s} {mean_cosine(M, M, exclude_diagonal=True):.6f}")
+
+    print()
+    print("== between-run mean cosine ==")
+    for a, b in combinations(mats.keys(), 2):
+        print(f"  {a:14s} vs {b:14s} {mean_cosine(mats[a], mats[b]):.6f}")
+
+
+if __name__ == "__main__":
+    main()

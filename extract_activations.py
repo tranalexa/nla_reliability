@@ -1,30 +1,33 @@
-"""Step 1: extract layer-32 residual activations from Gemma-3-12B on Modal.
+"""Step 1: extract Gemma-3-12B layer-32 residual activations on Modal.
 
-Supported datasets (--dataset):
-  prism     — Transluce/PRISM-gender-Llama-3.1-8B-Instruct
-              Samples n_items rows (default 400, seed 42).
-              CSV: /cache/prism_400.csv
-              Activations: /cache/activations_layer32_prism_gemma-3-12b-pt.parquet
+This step is **not** vendored from Anthropic NLA - it is a vanilla HuggingFace
+forward pass that captures the layer-32 residual stream at the final attended
+token of each prompt. The artifacts it writes are the inputs for Steps 2
+(``sample_descriptions.py``, AV) and Step 3 (``reconstruct_scores.py``, AR),
+which **do** use Anthropic NLA infrastructure (kitft client + checkpoints).
 
-  biosbias  — LabHC/bias_in_bios
-              Samples n_items rows (default 400, seed 42), stratified 50/50 by gender.
-              Gender indicators are scrubbed from bio text before extraction.
-              CSV: /cache/biosbias_400.csv
-              Activations: /cache/activations_layer32_biosbias_gemma-3-12b-pt.parquet
+Supported runs (--run-id):
 
-  mmlu      — cais/mmlu
-              Samples 4 subjects × 100 questions = 400 items (seed 42).
-              Subjects: abstract_algebra, moral_scenarios, virology, astronomy.
-              Prompt format: question stem only (choices in CSV metadata, not in prompt_text)
-              CSV: /cache/mmlu_400.csv
-              Activations: /cache/activations_layer32_mmlu_gemma-3-12b-pt.parquet
+  prism          PRISM gender conversations, last user-turn token.
+  biosbias       Bias-in-Bios biographies (gender-scrubbed), last token.
+  mmlu_choice    MMLU with A-D choices inside prompt_text; last token.
+  mmlu_nochoice  MMLU question stem only; last token.
+
+Outputs land on the Modal volume `nla-cache` at:
+
+  /cache/runs/<run_id>/<dataset>_400.csv
+  /cache/runs/<run_id>/activations_layer32_<dataset>_gemma-3-12b-pt.parquet
 
 Run:
-  uv run modal run extract_activations.py --dataset prism
-  uv run modal run extract_activations.py --dataset biosbias
-  uv run modal run extract_activations.py --dataset mmlu
-  uv run modal run extract_activations.py --all-datasets
-  uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
+  uv run modal run extract_activations.py --run-id prism
+  uv run modal run extract_activations.py --run-id biosbias
+  uv run modal run extract_activations.py --run-id mmlu_choice
+  uv run modal run extract_activations.py --run-id mmlu_nochoice
+  uv run modal run extract_activations.py --all-runs --n-items 400 --seed 42
+
+Random seed: 42 by default. Plumbed into the dataset sampler so HF shuffles +
+BiasBios stratified splits are reproducible. The Gemma forward pass itself is
+deterministic given the same inputs and bfloat16 weights.
 """
 
 from pathlib import Path
@@ -41,7 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DEFAULT_MODEL_ID = "google/gemma-3-12b-pt"
 LAYER = 32
-BATCH_SIZE = 4  # conservative for long PRISM sequences; safe for BiasBios too
+BATCH_SIZE = 4  # conservative for long PRISM sequences; safe for BiasBios + MMLU too
 
 CACHE = "/cache"
 HF_CACHE = f"{CACHE}/hf"
@@ -119,6 +122,9 @@ def load_model(model_id: str):
         device_map="cuda",
     ).eval()
 
+    # Gemma-3 wraps the decoder under `language_model`; unwrap so we can call
+    # `model.model(...)` directly and skip the ~3.5 GiB lm_head materialisation
+    # (which would OOM on long PRISM sequences).
     if hasattr(model, "language_model"):
         inner = model.language_model
         if hasattr(inner, "lm_head"):
@@ -134,6 +140,7 @@ def load_model(model_id: str):
 
 
 def extract_activations(model, tokenizer, prompts: list[str], layer: int) -> np.ndarray:
+    """Run Gemma over each prompt and return the layer-l hidden state at the final attended token."""
     device = model.get_input_embeddings().weight.device
     all_vecs = []
 
@@ -150,14 +157,14 @@ def extract_activations(model, tokenizer, prompts: list[str], layer: int) -> np.
             input_ids = enc["input_ids"].to(device)
             attention_mask = enc["attention_mask"].to(device)
 
-            # Call model.model (backbone) directly to skip the lm_head projection,
-            # which would allocate ~3.5 GiB and OOM on long PRISM sequences.
+            # model.model = the decoder backbone (no lm_head projection).
             out = model.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
                 use_cache=False,
             )
+            # +1 because hidden_states[0] is the embedding output.
             hidden = out.hidden_states[layer + 1]
 
             lengths = attention_mask.sum(dim=1).cpu()
@@ -181,31 +188,43 @@ def l2_normalize(x: np.ndarray) -> np.ndarray:
     secrets=[modal.Secret.from_name("huggingface")],
 )
 def run(
-    dataset: str,
+    run_id: str,
     n_items: int,
     seed: int,
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
+    """Container entry: build CSV (if missing), forward-pass Gemma, write activations parquet."""
     import sys
 
     sys.path.insert(0, "/root")
-    from nla.datasets import load_dataset_items
+    from nla.datasets import DEFAULT_MMLU_PROMPT_MODE, load_dataset_items
     from nla.paths import (
-        activations_filename,
-        csv_filename,
+        dataset_for_run,
+        mmlu_prompt_mode_for_run,
         volume_activations_path,
         volume_csv_path,
+        volume_run_dir,
     )
 
     vol.reload()
     setup_hf_cache()
 
     token = hf_token()
-    print(f"dataset={dataset}  n_items={n_items}  seed={seed}  layer={layer}")
+    dataset = dataset_for_run(run_id)
+    mmlu_prompt_mode = mmlu_prompt_mode_for_run(run_id) or DEFAULT_MMLU_PROMPT_MODE
 
-    # ── Load / build dataset CSV ───────────────────────────────────────────────
-    csv_path = volume_csv_path(dataset, n_items)
+    print(
+        f"run_id={run_id}  dataset={dataset}  n_items={n_items}  seed={seed}  "
+        f"layer={layer}  mmlu_prompt_mode={mmlu_prompt_mode}"
+    )
+
+    # Ensure the per-run directory exists on the volume.
+    Path(volume_run_dir(run_id)).mkdir(parents=True, exist_ok=True)
+
+    # ── Load / build dataset CSV ─────────────────────────────────────────────
+    csv_path = volume_csv_path(run_id, n_items)
+    df: pd.DataFrame | None = None
     if Path(csv_path).exists():
         existing = pd.read_csv(csv_path)
         if len(existing) == n_items:
@@ -213,22 +232,25 @@ def run(
             df = existing
         else:
             print(f"CSV row count mismatch ({len(existing)} != {n_items}); regenerating")
-            df = None
-    else:
-        df = None
 
     if df is None:
-        df = load_dataset_items(dataset, n_items=n_items, seed=seed, hf_token=token)
+        df = load_dataset_items(
+            dataset,
+            n_items=n_items,
+            seed=seed,
+            hf_token=token,
+            mmlu_prompt_mode=mmlu_prompt_mode,
+        )
         assert len(df) == n_items
         df.to_csv(csv_path, index=False)
         vol.commit()
         print(f"wrote {n_items} rows -> {csv_path}")
 
-    # ── Extract activations ────────────────────────────────────────────────────
+    # ── Extract activations ───────────────────────────────────────────────────
     prompts: list[str] = df["prompt_text"].tolist()
     assert len(prompts) == n_items
 
-    parquet_path = volume_activations_path(dataset, layer, model_id)
+    parquet_path = volume_activations_path(run_id, layer, model_id)
     print(f"output -> {parquet_path}")
 
     model, tokenizer = load_model(model_id)
@@ -236,7 +258,6 @@ def run(
 
     acts = extract_activations(model, tokenizer, prompts, layer)
     acts = l2_normalize(acts).astype(np.float32)
-
     assert acts.shape[0] == n_items, f"Expected {n_items} activations, got {acts.shape[0]}"
 
     table = pa.table({"activation_vector": acts.tolist()})
@@ -251,29 +272,30 @@ def run(
 
 @app.local_entrypoint()
 def main(
-    dataset: str = "prism",
-    all_datasets: bool = False,
+    run_id: str = "prism",
+    all_runs: bool = False,
     n_items: int = 400,
     seed: int = 42,
     model_id: str = DEFAULT_MODEL_ID,
     layer: int = LAYER,
 ):
     """
-    --dataset       prism | biosbias | mmlu  (default: prism)
-    --all-datasets  run prism, biosbias, and mmlu in sequence
-    --n-items       items to sample per dataset (default: 400)
-    --seed          shuffle seed (default: 42)
+    --run-id    prism | biosbias | mmlu_choice | mmlu_nochoice  (default: prism)
+    --all-runs  run all four canonical runs in sequence
+    --n-items   items to sample per run (default: 400)
+    --seed      shuffle seed (default: 42, propagates into dataset loaders)
     """
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from nla.datasets import SUPPORTED_DATASETS
+    from nla.paths import RUN_IDS, validate_run_id
 
-    datasets = SUPPORTED_DATASETS if all_datasets else [dataset]
-    for ds in datasets:
-        print(f"\n=== Extracting activations: {ds} (n_items={n_items}, seed={seed}) ===")
+    runs = list(RUN_IDS) if all_runs else [run_id]
+    for r in runs:
+        validate_run_id(r)
+        print(f"\n=== Extracting activations: {r} (n_items={n_items}, seed={seed}) ===")
         run.remote(
-            dataset=ds,
+            run_id=r,
             n_items=n_items,
             seed=seed,
             model_id=model_id,

@@ -4,24 +4,24 @@ Compute the full pairwise cosine similarity matrix among the 400 original
 activation vectors and its mean-centered counterpart.
 
 Run:
-  uv run python scripts/activation_cosine_matrix.py
-  uv run python scripts/activation_cosine_matrix.py --save
-  uv run python scripts/activation_cosine_matrix.py \\
-    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
-    --save
+  uv run python scripts/activation_cosine_matrix.py --run-id prism
+  uv run python scripts/activation_cosine_matrix.py --run-id biosbias --save
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
+sys.path.insert(0, str(ROOT))
 
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
+from nla.paths import local_activations_path, validate_run_id  # noqa: E402
+
+DEFAULT_RUN_ID = "prism"
 
 
 def off_diagonal(M: np.ndarray) -> np.ndarray:
@@ -50,10 +50,16 @@ def section(title: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--activations", type=Path, default=DEFAULT_ACTIVATIONS)
+    ap.add_argument("--run-id", default=DEFAULT_RUN_ID,
+                    help="Canonical run_id (prism | biosbias | mmlu_choice | mmlu_nochoice)")
+    ap.add_argument("--activations", type=Path, default=None,
+                    help="Override activation parquet path (default: derived from --run-id)")
     ap.add_argument("--save", action="store_true",
                     help="Save cosine matrices as .npy files alongside the parquet")
     args = ap.parse_args()
+
+    validate_run_id(args.run_id)
+    args.activations = args.activations or local_activations_path(args.run_id)
 
     if not args.activations.exists():
         raise FileNotFoundError(args.activations)

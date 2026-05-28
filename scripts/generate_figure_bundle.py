@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Generate the full figure bundle for the NLA reliability synthesis.
+"""Generate the canonical figure bundle for the NLA reliability synthesis.
+
+This is the **single** PNG-producing script. All 17 figures land in
+``figures_bundle/`` (the only figure output directory).
 
 Reads:
   reports/synthesis_headline_metrics.csv
   reports/synthesis_text_consistency.csv
+  reports/synthesis_text_between_item.csv     (optional, drives 04b/04c/04d)
   reports/synthesis_linear_probes.csv
   reports/synthesis_g_theory_variance.csv
   reports/synthesis_g_theory_d_study.csv
-  data/data/{fidelity_scores,pairwise_consistency}_{prism,biosbias,mmlu}.parquet
-  data/{fidelity_scores,pairwise_consistency}_mmlu.parquet  (MMLU question-only)
+  data/runs/<run_id>/{fidelity_scores,pairwise_consistency,text_*}_<dataset>.parquet
 
-Writes all PNGs into figures_bundle/.
+Run after ``scripts/build_synthesis_tables.py``.
 """
 from __future__ import annotations
 
@@ -27,36 +30,31 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from nla.paths import (  # noqa: E402
+    RUN_IDS,
+    dataset_for_run,
+    local_fidelity_path,
+    local_pairwise_path,
+    local_text_between_item_mpnet_path,
+    local_text_consistency_mpnet_path,
+    run_dir,
+)
+
 REPORTS = ROOT / "reports"
-DATA = ROOT / "data"
-INNER = DATA / "data"
 OUT = ROOT / "figures_bundle"
 
-RUN_ORDER = ["prism", "biosbias", "mmlu_with_choices", "mmlu_question_only"]
+RUN_ORDER = list(RUN_IDS)
 RUN_LABELS = {
     "prism": "PRISM",
     "biosbias": "Bias in Bios",
-    "mmlu_with_choices": "MMLU-Choice",
-    "mmlu_question_only": "MMLU-NoChoice",
+    "mmlu_choice": "MMLU-Choice",
+    "mmlu_nochoice": "MMLU-NoChoice",
 }
 RUN_COLORS = {
     "prism": "#2176ae",
     "biosbias": "#e05c2a",
-    "mmlu_with_choices": "#7a5195",
-    "mmlu_question_only": "#bc5090",
-}
-
-DATA_DIR_BY_RUN = {
-    "prism": INNER,
-    "biosbias": INNER,
-    "mmlu_with_choices": INNER,
-    "mmlu_question_only": DATA,
-}
-DS_BY_RUN = {
-    "prism": "prism",
-    "biosbias": "biosbias",
-    "mmlu_with_choices": "mmlu",
-    "mmlu_question_only": "mmlu",
+    "mmlu_choice": "#7a5195",
+    "mmlu_nochoice": "#bc5090",
 }
 
 
@@ -222,13 +220,8 @@ def fig_text_within_between(text_between: pd.DataFrame) -> None:
 
 
 def _load_text_within_between_per_activation(run_id: str) -> pd.DataFrame | None:
-    ds = DS_BY_RUN[run_id]
-    if run_id == "mmlu_with_choices":
-        within_path = DATA / "text_consistency_mpnet_mmlu_choices.parquet"
-        between_path = DATA / "text_between_item_mpnet_mmlu_choices.parquet"
-    else:
-        within_path = DATA / f"text_consistency_mpnet_{ds}.parquet"
-        between_path = DATA / f"text_between_item_mpnet_{ds}.parquet"
+    within_path = local_text_consistency_mpnet_path(run_id)
+    between_path = local_text_between_item_mpnet_path(run_id)
     if not within_path.exists() or not between_path.exists():
         return None
     within = pd.read_parquet(within_path)[["activation_idx", "mean_pairwise_text_cosine"]]
@@ -297,6 +290,117 @@ def fig_text_specificity_distributions() -> None:
     _save(fig, "04c_text_similarity_distributions.png")
 
 
+def activation_text_similarity_table(
+    headline: pd.DataFrame,
+    text_between: pd.DataFrame | None,
+) -> pd.DataFrame | None:
+    if text_between is None:
+        return None
+
+    rows = []
+    for run_id in RUN_ORDER:
+        h = headline[headline["run_id"] == run_id].set_index("metric")
+        t = text_between[text_between["run_id"] == run_id]
+        if h.empty or t.empty:
+            continue
+        t = t.iloc[0]
+        rows.append(
+            {
+                "run_id": run_id,
+                "run": RUN_LABELS[run_id],
+                "activation_within_centered": h.loc[
+                    "Consistency centered (within-item)", "mean"
+                ],
+                "activation_between_centered": h.loc[
+                    "Consistency centered (between-item)", "mean"
+                ],
+                "activation_gap_centered": h.loc[
+                    "Consistency centered gap", "mean"
+                ],
+                "text_within_mpnet": t["within_mean"],
+                "text_between_mpnet": t["between_mean"],
+                "text_gap_mpnet": t["gap_within_minus_between"],
+                "gap_difference_activation_minus_text": (
+                    h.loc["Consistency centered gap", "mean"]
+                    - t["gap_within_minus_between"]
+                ),
+            }
+        )
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def fig_activation_text_similarity_table(
+    headline: pd.DataFrame,
+    text_between: pd.DataFrame | None,
+) -> None:
+    table = activation_text_similarity_table(headline, text_between)
+    if table is None:
+        return
+
+    out_csv = REPORTS / "synthesis_activation_vs_text_similarity.csv"
+    table.to_csv(out_csv, index=False)
+
+    show = table[
+        [
+            "run",
+            "activation_within_centered",
+            "activation_between_centered",
+            "activation_gap_centered",
+            "text_within_mpnet",
+            "text_between_mpnet",
+            "text_gap_mpnet",
+            "gap_difference_activation_minus_text",
+        ]
+    ].copy()
+    show.columns = [
+        "Run",
+        "Act within",
+        "Act between",
+        "Act gap",
+        "Text within",
+        "Text between",
+        "Text gap",
+        "Δ gap",
+    ]
+
+    cell_text = []
+    for _, row in show.iterrows():
+        cell_text.append(
+            [row["Run"], *[f"{row[col]:.3f}" for col in show.columns[1:]]]
+        )
+
+    fig, ax = plt.subplots(figsize=(14.6, 2.9))
+    ax.axis("off")
+    tbl = ax.table(
+        cellText=cell_text,
+        colLabels=show.columns.tolist(),
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9.5)
+    tbl.scale(1, 1.55)
+    for (row, col), cell in tbl.get_celld().items():
+        if row == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#e9ecef")
+        elif col == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#f8f9fa")
+        elif col in {3, 6, 7}:
+            cell.set_facecolor("#f1f7ff")
+    ax.set_title(
+        "Activation-space vs text-space similarity\n"
+        "Activation = centered recon consistency; Text = MPNet description cosine",
+        fontsize=13,
+        fontweight="bold",
+        pad=14,
+    )
+    _save(fig, "04d_activation_vs_text_similarity_table.png")
+
+
 def fig_linear_probes(probes: pd.DataFrame) -> None:
     sub = probes.copy()
     sub["key"] = sub["run_id"] + " · " + sub["target"]
@@ -310,8 +414,8 @@ def fig_linear_probes(probes: pd.DataFrame) -> None:
         "prism · gender",
         "biosbias · profession",
         "biosbias · gender",
-        "mmlu_with_choices · subject",
-        "mmlu_question_only · subject",
+        "mmlu_choice · subject",
+        "mmlu_nochoice · subject",
     ])
     pivot_acc = pivot_acc.dropna(how="all")
 
@@ -319,8 +423,8 @@ def fig_linear_probes(probes: pd.DataFrame) -> None:
         "prism · gender": "PRISM · gender",
         "biosbias · profession": "Bias in Bios · profession",
         "biosbias · gender": "Bias in Bios · gender",
-        "mmlu_with_choices · subject": "MMLU-Choice · subject",
-        "mmlu_question_only · subject": "MMLU-NoChoice · subject",
+        "mmlu_choice · subject": "MMLU-Choice · subject",
+        "mmlu_nochoice · subject": "MMLU-NoChoice · subject",
     }
     labels = [pretty[i] for i in pivot_acc.index]
     pos = np.arange(len(labels))
@@ -371,7 +475,6 @@ def fig_d_study(gdstudy: pd.DataFrame, metric: str, title: str, fname: str) -> N
         ax.plot(s["n_samples"], s["G_rel"], marker="o", lw=2,
                 color=RUN_COLORS[r], label=RUN_LABELS[r])
     ax.axhline(0.90, color="grey", lw=0.8, ls="--", label=r"$G = 0.90$")
-    ax.axhline(0.95, color="grey", lw=0.8, ls=":", label=r"$G = 0.95$")
     ax.set_xticks([1, 2, 3, 4, 6, 12])
     ax.set_xlabel("n′ (averaged AV samples per activation)")
     ax.set_ylabel(r"Relative generalizability, $G(n')$")
@@ -395,7 +498,6 @@ def fig_d_study_compare(gdstudy: pd.DataFrame) -> None:
             ax.plot(s["n_samples"], s["G_rel"], marker="o", lw=2,
                     color=RUN_COLORS[r], label=RUN_LABELS[r])
         ax.axhline(0.90, color="grey", lw=0.8, ls="--")
-        ax.axhline(0.95, color="grey", lw=0.8, ls=":")
         ax.set_xticks([1, 2, 3, 4, 6, 12])
         ax.set_xlabel("n′ averaged samples")
         ax.set_title(title)
@@ -434,16 +536,14 @@ def fig_g_rel_n1_n12_bars(gvar: pd.DataFrame) -> None:
 
 
 def _load_fidelity(run_id: str) -> np.ndarray:
-    ds = DS_BY_RUN[run_id]
-    p = DATA_DIR_BY_RUN[run_id] / f"fidelity_scores_{ds}.parquet"
+    p = local_fidelity_path(run_id)
     if not p.exists():
         return np.array([])
     return pd.read_parquet(p)["fidelity_cos"].to_numpy(dtype=np.float32)
 
 
 def _load_pairwise_within(run_id: str) -> np.ndarray:
-    ds = DS_BY_RUN[run_id]
-    p = DATA_DIR_BY_RUN[run_id] / f"pairwise_consistency_{ds}.parquet"
+    p = local_pairwise_path(run_id)
     if not p.exists():
         return np.array([])
     return pd.read_parquet(p)["cos_sim"].to_numpy(dtype=np.float32)
@@ -487,8 +587,8 @@ def fig_raw_score_violins() -> None:
 def fig_per_item_mean_scatter() -> None:
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.5), sharex=False, sharey=False)
     for ax, run_id in zip(axes.flat, RUN_ORDER):
-        fid_path = DATA_DIR_BY_RUN[run_id] / f"fidelity_scores_{DS_BY_RUN[run_id]}.parquet"
-        pw_path = DATA_DIR_BY_RUN[run_id] / f"pairwise_consistency_{DS_BY_RUN[run_id]}.parquet"
+        fid_path = local_fidelity_path(run_id)
+        pw_path = local_pairwise_path(run_id)
         if not fid_path.exists() or not pw_path.exists():
             ax.set_visible(False)
             continue
@@ -560,6 +660,7 @@ def main() -> None:
     if text_between is not None:
         fig_text_within_between(text_between)
         fig_text_specificity_distributions()
+        fig_activation_text_similarity_table(headline, text_between)
     fig_linear_probes(probes)
     fig_gtheory_overview(gvar)
     fig_g_variance_components(

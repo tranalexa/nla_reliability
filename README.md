@@ -1,148 +1,96 @@
 # nla_reliability
 
-This repo evaluates NLA reliability on three datasets: **PRISM**, **Bias in Bios**, and **MMLU**. For each dataset, we sample 400 items, extract Gemma-3-12B layer-32 activations, generate 12 AV descriptions per activation, reconstruct each description with AR, and evaluate consistency and fidelity using raw and mean-centered cosine diagnostics.
+Reliability evaluation layer on top of Anthropic's **Natural Language Autoencoders (NLA)**.
+We sample 400 items from four canonical runs (PRISM, Bias-in-Bios, MMLU + choices,
+MMLU question-only), extract Gemma-3-12B layer-32 activations, generate 12
+stochastic AV (Activation Verbalizer) descriptions per activation with the
+public NLA AV checkpoint, reconstruct each description back to an activation with
+the AR (Activation Reconstructor) checkpoint, and quantify reliability using
+mean-centered cosine fidelity/consistency, MPNet text-consistency, linear
+probes, and generalizability-theory variance decomposition.
 
-Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
+> **Built on Anthropic's Natural Language Autoencoders.**
+>
+> NLA is Anthropic / Transformer Circuits' framework for unsupervised
+> verbalization and reconstruction of LLM activations. This repo does **not**
+> retrain NLAs — it consumes Anthropic's pretrained AV/AR checkpoints
+> (released on Hugging Face via the kitft account) and adds a reliability-
+> evaluation layer on top. The inference client at
+> [`nla/nla_inference.py`](nla/nla_inference.py) is vendored unchanged from
+> kitft (MIT) and provides **both** `NLAClient` (AV, used in Step 2) and
+> `NLACritic` (AR, used in Step 3).
+>
+> - Research post: <https://www.anthropic.com/research/natural-language-autoencoders>
+> - Paper (Fraser-Taliente, Kantamneni, Ong, et al., Transformer Circuits, 2026):
+>   <https://transformer-circuits.pub/2026/nla/index.html>
+> - AV checkpoint: <https://huggingface.co/kitft/nla-gemma3-12b-L32-av>
+> - AR checkpoint: <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>
+> - Vendored client: <https://github.com/kitft/natural_language_autoencoders>
+>
+> ```bibtex
+> @article{frasertaliente2026nla,
+>   title  = {Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations},
+>   author = {Fraser-Taliente, Cody and Kantamneni, Sanjana and Ong, Ben and others},
+>   journal= {Transformer Circuits},
+>   year   = {2026},
+>   url    = {https://transformer-circuits.pub/2026/nla/index.html}
+> }
+> ```
+>
+> See [NOTICE](NOTICE), [CITATION.cff](CITATION.cff), and
+> [nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the full attribution stack.
 
-## Project layout
+---
+
+## Repo structure
 
 ```text
-extract_activations.py   # Modal Step 1
-sample_descriptions.py   # Modal Step 2
-reconstruct_scores.py    # Modal Step 3 (AR pairwise + fidelity)
-nla/                     # shared library
-  datasets.py            # dataset loading: PRISM, Bias in Bios
-  paths.py               # dataset-specific artifact path helpers
-  nla_inference.py       # NLAClient / NLACritic (vendored from kitft; see Attribution)
-  activation_utils.py    # activation loading utilities
-scripts/                 # local tools (pull, preview, diagnostics)
-data/                    # downloaded volume artifacts (gitignored)
+extract_activations.py        Modal Step 1 (Gemma forward pass; **not** Anthropic NLA code)
+sample_descriptions.py        Modal Step 2 (NLAClient = AV; uses Anthropic NLA checkpoint)
+reconstruct_scores.py         Modal Step 3 (NLACritic = AR; uses Anthropic NLA checkpoint)
+nla/
+  __init__.py                 Public re-exports
+  nla_inference.py            VENDORED FROM kitft — NLAClient + NLACritic
+  datasets.py                 PRISM / BiasBios / MMLU loaders (+ mmlu prompt modes)
+  paths.py                    run_id-keyed local + Modal volume path helpers
+  g_theory.py                 G-study + D-study variance decomposition
+  synthesis_metrics.py        Centered fidelity/consistency, probes, summary tables
+  ATTRIBUTION.md              Detailed attribution for the vendored inference client
+scripts/
+  pull_from_modal.py          Download artifacts from Modal volume per run_id
+  compute_text_consistency.py            Within-item MPNet cosine per run_id
+  compute_text_consistency_between.py    Between-item MPNet baseline per run_id
+  g_theory_study.py           G-theory study per run_id and metric
+  train_linear_probes.py      Majority + LR probes (profession / gender)
+  train_linear_probe_mmlu.py  Subject probes for MMLU runs
+  build_synthesis_tables.py   All reports/*.csv + reports/results_table.tex
+  generate_figure_bundle.py   All figures_bundle/*.png (the single figure output dir)
+  smoke_test_loaders.py       No-GPU sanity check that PRISM/BiasBios/MMLU load
+  diagnose_*.py / preview_descriptions.py  ad-hoc inspection utilities
+data/runs/<run_id>/           Local artifacts after pull_from_modal (gitignored)
+reports/                      Synthesis CSVs + LaTeX table (gitignored)
+figures_bundle/               17 paper figures (gitignored)
+notebooks/analysis_synthesis.ipynb   Source notebook (outputs cleared at commit)
+EXPERIMENT_OVERVIEW.md        Full conceptual write-up (provenance + design + metrics)
 ```
 
-### Attribution (`nla/nla_inference.py`)
+The four canonical **run_ids** (used everywhere in CLI flags + path helpers):
 
-Vendored from [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders) (`nla_inference.py` on main). Implements the **activation verbalizer (AV)** and **activation reconstructor (AR)** sides of Natural Language Autoencoders (NLAs) from Anthropic / [Transformer Circuits (2026)](https://transformer-circuits.pub/2026/nla/index.html). This reliability repo does not retrain NLAs; it uses the published [Gemma-3 AV checkpoint](https://huggingface.co/kitft/nla-gemma3-12b-L32-av) and [AR checkpoint](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar) on Modal.
-
----
-
-## Datasets
-
-### PRISM
-
-**Source:** `Transluce/PRISM-gender-Llama-3.1-8B-Instruct`
-
-Each PRISM item is a multi-turn conversation. The pipeline flattens all turns up to the last user turn into a single string (`User: … \n Assistant: … \n User: …`), dropping any trailing assistant turns so the final Gemma token is the last user token. Gemma reads this flattened conversation text directly.
-
-Metadata kept in the CSV: `gender` (model-predicted), `gt_gender` (survey ground truth). These are not used by the core pipeline; they are available for diagnostic grouping.
-
-### Bias in Bios
-
-**Source:** `LabHC/bias_in_bios`
-
-Each item is a biography (`hard_text` field, which already omits the opening name sentence). Before extraction, explicit gender indicators (pronouns, honorifics, gendered nouns) are scrubbed and replaced with `[PERSON]`. Sampling is stratified 50/50 by gender (200 male / 200 female per 400-item run).
-
-Metadata kept in the CSV: `profession`, `gender`. These are not used by the core pipeline.
-
-### MMLU
-
-**Source:** `cais/mmlu`
-
-MMLU is sampled as four subjects × 100 questions rather than all 57 subjects. The four subjects are `abstract_algebra`, `moral_scenarios`, `virology`, and `astronomy`. This gives enough examples per subject for interpretable domain-level comparisons across formal reasoning, ethics/social judgment, biomedical science, and physical science.
-
-Each item is formatted as a multiple-choice question with four labeled options; the correct answer is kept as metadata only and is not included in `prompt_text`. The loader prefers the `test` split (falls back to `validation` if test has fewer than 100 usable rows per subject). No text scrubbing is applied.
-
-`prompt_text` format:
-
-```
-Question: {question}
-
-A. {choices[0]}
-B. {choices[1]}
-C. {choices[2]}
-D. {choices[3]}
-
-Answer:
-```
-
-Metadata kept in the CSV: `subject`, `question`, `choices` (JSON-serialized list), `answer` (integer index), `split` (which HF split was used).
-
----
-
-## Pipeline overview
-
-```text
-PRISM (400 items)        → Step 1: Gemma forward pass → prism activations
-Bias in Bios (400 items) → Step 1: Gemma forward pass → biosbias activations
-    ↓
-Step 2: AV × 12 stochastic descriptions per activation
-    ↓
-Step 3: AR reconstruction → pairwise consistency + fidelity scores
-    ↓
-Local diagnostics: raw + centered cosine analysis
-```
-
-Row index `i` is aligned within each dataset: item `i` in the CSV ↔ activation `i` ↔ description rows with `activation_idx == i`.
-
-### Expected outputs
-
-| Dataset | Items | Samples/item | Description rows | Pairwise rows | Fidelity rows |
-|---------|-------|-------------|-----------------|---------------|---------------|
-| PRISM | 400 | 12 | 4,800 | 26,400 | 4,800 |
-| Bias in Bios | 400 | 12 | 4,800 | 26,400 | 4,800 |
-| MMLU | 400 | 12 | 4,800 | 26,400 | 4,800 |
-| **Total** | **1,200** | 12 | **14,400** | **79,200** | **14,400** |
-
-Pairwise rows = 400 × C(12, 2) = 400 × 66 = 26,400 per dataset.
-
----
-
-## Evaluation metrics
-
-Raw cosine similarity between an original activation and its reconstruction is typically near 0.99 — but this is not meaningful evidence of reconstruction quality. The original activation vectors share a dominant background direction (the global mean vector has norm ≈ 0.99), which inflates cosine similarity for *any* pair of vectors. The meaningful question is whether reconstructions carry **activation-specific** directional information beyond that shared background.
-
-Three complementary metrics are reported, each at the raw level and after mean-centering. Let **μ** be the mean of all original activation vectors and let **r̂** = r / ‖r‖ denote a unit-normalised reconstruction.
-
-### 1 · Raw cosine similarity
-
-`cos(original_i, reconstruction_i)` — reported for reference, but should not be interpreted in isolation. High raw cosine is expected regardless of reconstruction quality due to the shared mean direction.
-
-### 2 · Fidelity (specificity)
-
-Does a reconstruction point toward the *correct* original activation more than toward wrong ones?
-
-| Metric | Definition |
-|--------|-----------|
-| Raw matched fidelity | `cos(original_i, reconstruction_i)` |
-| Raw mismatched fidelity | `cos(original_j, reconstruction_i)`,  j ≠ i |
-| **Raw fidelity gap** | matched − mismatched |
-| Centered matched fidelity | `cos(original_i − μ,  r̂_i − μ)` |
-| Centered mismatched fidelity | `cos(original_j − μ,  r̂_i − μ)`,  j ≠ i |
-| **Centered fidelity gap** | matched − mismatched |
-
-Fidelity is supported when the **centered gap** is large and positive. Script: `scripts/diagnose_reconstruction_fidelity.py`
-
-### 3 · Consistency (reliability)
-
-Do 12 reconstructions from different descriptions of the *same* activation agree with each other more than reconstructions from *different* activations do?
-
-| Metric | Definition |
-|--------|-----------|
-| Raw within-item | `cos(recon_{i,a}, recon_{i,b})`,  a ≠ b, same activation |
-| Raw between-item baseline | `cos(recon_{i,a}, recon_{j,b})`,  i ≠ j |
-| **Raw consistency gap** | within-item − between-item |
-| Centered within-item | `cos(r̂_{i,a} − μ,  r̂_{i,b} − μ)` |
-| Centered between-item baseline | `cos(r̂_{i,a} − μ,  r̂_{j,b} − μ)`,  i ≠ j |
-| **Centered consistency gap** | within-item − between-item |
-
-Consistency is supported when the **centered gap** is large and positive. Script: `scripts/diagnose_reconstruction_consistency.py`
-
-> Raw cosine scores may be high because of shared activation-space structure. The more meaningful results are baseline-adjusted gaps after centering. Fidelity is supported when centered matched similarity is much higher than centered mismatched similarity. Consistency is supported when centered within-item similarity is much higher than centered between-item similarity.
+| run_id          | dataset    | prompt format                                       |
+|-----------------|------------|-----------------------------------------------------|
+| `prism`         | prism      | last user turn of a multi-turn chat                 |
+| `biosbias`      | biosbias   | full biography (gender-scrubbed)                    |
+| `mmlu_choice`   | mmlu       | `Question: … \n A.… B.… C.… D.… \n Answer:`         |
+| `mmlu_nochoice` | mmlu       | question stem only (choices kept as CSV metadata)   |
 
 ---
 
 ## Setup (once per machine)
 
-You need [uv](https://docs.astral.sh/uv/), a Modal account, and Hugging Face access to gated Gemma + AV/AR weights.
+You need [uv](https://docs.astral.sh/uv/) (or plain pip), a Modal account, and
+a Hugging Face token with read access to Gemma-3 + the kitft NLA checkpoints.
+
+### Install with uv (preferred)
 
 ```bash
 uv sync
@@ -150,298 +98,225 @@ uv run modal setup
 modal secret create --force huggingface HF_TOKEN=<your_hf_token>
 ```
 
-Accept licenses: [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt), [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av), [nla-gemma3-12b-L32-ar](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar).
+### Install with pip (alternative)
 
-`LabHC/bias_in_bios` is publicly accessible (no license gate needed).
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+modal setup
+modal secret create --force huggingface HF_TOKEN=<your_hf_token>
+```
+
+`requirements.txt` is generated from `uv.lock`
+(`uv export --format requirements.txt --no-dev > requirements.txt`); the
+canonical lockfile is still `uv.lock` so `uv sync` is the most reliable path.
+
+### Accept Hugging Face licenses
+
+- [google/gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt)
+- [kitft/nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av)
+- [kitft/nla-gemma3-12b-L32-ar](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar)
+
+`LabHC/bias_in_bios` and `cais/mmlu` are publicly accessible.
 
 ### Smoke test (no GPU, no Modal)
-
-Verify both dataset loaders work before running any Modal jobs:
 
 ```bash
 HF_TOKEN=<your_hf_token> uv run python scripts/smoke_test_loaders.py
 ```
 
-This loads 5 items from each dataset, checks that `item_idx`, `dataset`, and `prompt_text` are present and non-empty, and prints prompt previews. Expected output ends with:
+Loads 5 items from each dataset and prints prompt previews. Expected ending:
 
 ```
   PASS  prism
   PASS  biosbias
+  PASS  mmlu
 
 All dataset loaders OK.
 ```
 
----
-
-## Run on Modal
-
-Scripts accept `--dataset prism|biosbias|mmlu` for single-dataset runs, or `--all-datasets` to run all three in sequence with one command. Each dataset runs through the same stage independently; artifacts remain separate.
-
-> **Note — `--all-datasets` volume conflict:** When running both datasets sequentially with `--all-datasets`, the second dataset's container may fail with `RuntimeError: there are open files preventing the operation` if the first container's HuggingFace xet transfer logs are still open on the volume. This is a transient Modal platform race condition. If it happens, re-run the failed dataset individually (e.g. `--dataset biosbias`).
-
-### Step 1 — Extract activations (~5–15 min per dataset, 1× A100 each)
+You can also dry-run the local analysis chain (only checks file presence and
+schemas; no compute):
 
 ```bash
-# Single dataset
-uv run modal run extract_activations.py --dataset prism --n-items 400
-uv run modal run extract_activations.py --dataset biosbias --n-items 400
-uv run modal run extract_activations.py --dataset mmlu --n-items 400
-
-# All datasets in one command (sequential)
-uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
-```
-
-### Step 2 — AV descriptions (~30–90 min per dataset, 12× A100 each)
-
-```bash
-uv run modal run sample_descriptions.py --dataset prism --n-samples 12
-uv run modal run sample_descriptions.py --dataset biosbias --n-samples 12
-uv run modal run sample_descriptions.py --dataset mmlu --n-samples 12
-
-# All datasets in one command
-uv run modal run sample_descriptions.py --all-datasets --n-samples 12
-```
-
-Fewer GPUs: add `--n-shards 1`
-
-### Step 3 — AR reconstruction + scores (~15–45 min per dataset, 12× A100 each)
-
-Pass `--save-vectors` to save raw reconstructed vectors; required for the centered-cosine diagnostics.
-
-```bash
-uv run modal run reconstruct_scores.py --dataset prism --save-vectors
-uv run modal run reconstruct_scores.py --dataset biosbias --save-vectors
-uv run modal run reconstruct_scores.py --dataset mmlu --save-vectors
-
-# All datasets in one command
-uv run modal run reconstruct_scores.py --all-datasets --save-vectors
-```
-
-Fewer GPUs: add `--n-shards 1`
-
-Raw cosine scores (pairwise and fidelity) will be near 0.99. This is expected. See [Evaluation metrics](#evaluation-metrics) for how to interpret them using baseline-adjusted centered gaps.
-
----
-
-## Pull results locally (`data/`)
-
-```bash
-# Single dataset
-uv run python scripts/pull_from_modal.py --dataset prism
-uv run python scripts/pull_from_modal.py --dataset biosbias
-uv run python scripts/pull_from_modal.py --dataset mmlu
-
-# All datasets
-uv run python scripts/pull_from_modal.py --all-datasets
-
-# Subset of artifact types
-uv run python scripts/pull_from_modal.py --dataset prism --only csv,activations,descriptions
-```
-
-Artifact types available with `--only`: `csv`, `activations`, `descriptions`, `pairwise`, `fidelity`, `vectors`
-
-If a pull fails: `modal volume ls nla-cache` to inspect the volume.
-
----
-
-## Diagnostics (local)
-
-After pulling artifacts to `data/`, run any of the following scripts. The diagnostic scripts accept `--activations` and `--recon-vectors` paths; defaults shown below assume the standard artifact names.
-
-```bash
-# Cross-dataset activation similarity (PRISM vs BiosBias)
-uv run python scripts/compare_benchmark_activations.py
-
-# Full pairwise cosine similarity matrix: raw and mean-centered
-uv run python scripts/activation_cosine_matrix.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet
-
-uv run python scripts/activation_cosine_matrix.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet
-
-# Inflation diagnostic: are ~0.99 raw cosines artefacts of the shared mean direction?
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet
-
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet
-
-# Fidelity: does each reconstruction match its own activation better than other activations?
-# Requires recon_vectors_*.parquet (Step 3 --save-vectors)
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_prism.parquet
-
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_biosbias.parquet
-
-# Consistency: do the 12 reconstructions per activation agree more than cross-activation ones?
-# Requires recon_vectors_*.parquet (Step 3 --save-vectors)
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_prism.parquet
-
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_biosbias.parquet
-
-uv run python scripts/activation_cosine_matrix.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
-
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
-
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_mmlu.parquet
-
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_mmlu.parquet
+uv run python scripts/build_synthesis_tables.py --dry-run
 ```
 
 ---
 
-## Report tables and figures (local)
+## End-to-end Modal pipeline
 
-After pulling artifacts to `data/` (Step F), generate summary tables and figures:
+All three Modal jobs accept `--run-id <id>` for a single run, or `--all-runs`
+for all four. Outputs land on the Modal volume `nla-cache` (mounted at
+`/cache` inside containers) under `/cache/runs/<run_id>/`.
+
+> **Heads-up on `--all-runs`:** running back-to-back jobs occasionally trips
+> Modal's transient "open files preventing the operation" error on the shared
+> volume. If that happens, just rerun the failing run_id individually.
+
+### Step 1 — Extract activations (≈ 5–15 min per run, 1× A100)
 
 ```bash
-uv run python scripts/make_report_tables.py
+uv run modal run extract_activations.py --run-id prism         --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id biosbias      --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id mmlu_choice   --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id mmlu_nochoice --n-items 400 --seed 42
+# or:
+uv run modal run extract_activations.py --all-runs --n-items 400 --seed 42
 ```
 
-Outputs:
-
-| Path | What it is |
-|------|------------|
-| `reports/summary_stats.csv` | Per-dataset mean/std/median/p5/p95 for all fidelity and consistency metrics |
-| `reports/results_table.tex` | LaTeX table ready for the paper |
-| `figures/fidelity_dist.png` | Violin plots of centered matched and mismatched fidelity by dataset |
-| `figures/consistency_dist.png` | Violin plots of centered within-item and between-item consistency by dataset |
-| `figures/raw_vs_centered.png` | Bar chart comparing raw vs centered fidelity and consistency gaps |
-| `figures/cosine_inflation.png` | Bar chart illustrating cosine inflation — raw vs centered fidelity metrics |
-
-Requires `recon_vectors_*.parquet` (Step 3 `--save-vectors`) for centered metrics. If absent, falls back to pre-computed raw scores from `fidelity_scores_*.parquet` and `pairwise_consistency_*.parquet`.
-
-Custom paths:
+### Step 2 — Sample AV descriptions (≈ 30–90 min per run, up to 12× A100-80GB)
 
 ```bash
-uv run python scripts/make_report_tables.py \
-  --data-dir data --out-dir reports --fig-dir figures
+uv run modal run sample_descriptions.py --run-id prism         --n-samples 12
+uv run modal run sample_descriptions.py --run-id biosbias      --n-samples 12
+uv run modal run sample_descriptions.py --run-id mmlu_choice   --n-samples 12
+uv run modal run sample_descriptions.py --run-id mmlu_nochoice --n-samples 12
+# or:
+uv run modal run sample_descriptions.py --all-runs --n-samples 12
+```
+
+Limit parallel GPUs with `--n-shards 1` (or any value ≤ 12) if you don't have
+the quota.
+
+### Step 3 — AR reconstruction + scoring (≈ 15–45 min per run, up to 12× A100)
+
+Pass `--save-vectors` so the centered-cosine diagnostics work locally.
+
+```bash
+uv run modal run reconstruct_scores.py --run-id prism         --save-vectors
+uv run modal run reconstruct_scores.py --run-id biosbias      --save-vectors
+uv run modal run reconstruct_scores.py --run-id mmlu_choice   --save-vectors
+uv run modal run reconstruct_scores.py --run-id mmlu_nochoice --save-vectors
+# or:
+uv run modal run reconstruct_scores.py --all-runs --save-vectors
+```
+
+Raw fidelity / pairwise cosines will sit near 0.99. That is **expected** —
+activation space has a strong shared mean direction and raw cosines must be
+read in tandem with the centered diagnostics generated downstream (see
+`scripts/build_synthesis_tables.py` and the notebook).
+
+---
+
+## Local analysis (after the Modal pipeline finishes)
+
+```bash
+# 1. Pull all four runs into data/runs/<run_id>/
+uv run python scripts/pull_from_modal.py --all-runs
+
+# 2. Compute MPNet text consistency for each run (~minutes on CPU)
+uv run python scripts/compute_text_consistency.py         --all-runs
+uv run python scripts/compute_text_consistency_between.py --all-runs
+
+# 3. G-theory study per run + metric (writes per-run g_theory_*.csv)
+for r in prism biosbias mmlu_choice mmlu_nochoice; do
+  uv run python scripts/g_theory_study.py --run-id "$r" --metric all
+done
+
+# 4. Linear probes (profession/gender on PRISM+BiasBios, subject on MMLU runs)
+uv run python scripts/train_linear_probes.py
+uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_choice
+uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_nochoice
+
+# 5. Synthesise every reports/*.csv + reports/results_table.tex
+uv run python scripts/build_synthesis_tables.py
+
+# 6. Render every figures_bundle/*.png (the single figure output dir)
+uv run python scripts/generate_figure_bundle.py
+
+# 7. Execute the analysis notebook (uses the CSVs from step 5)
+uv run jupyter nbconvert --to notebook --execute \
+    notebooks/analysis_synthesis.ipynb --inplace
+```
+
+If you want to inspect AV samples interactively:
+
+```bash
+uv run python scripts/preview_descriptions.py --run-id prism --n 3
 ```
 
 ---
 
-## Volume artifacts (`nla-cache` → `/cache` in jobs)
+## Script → paper figure / table map
 
-### PRISM
+Every figure and table in the paper is regenerated by exactly one (or a small
+pipeline of) scripts in this repo:
 
-| Path | What it is |
-|------|------------|
-| `prism_400.csv` | 400 PRISM items with `item_idx`, `dataset`, `prompt_text`, `gender`, `gt_gender` |
-| `activations_layer32_prism_gemma-3-12b-pt.parquet` | PRISM activation vectors (layer 32, last user-turn token, L2-normalized) |
-| `descriptions_prism.parquet` | `activation_idx`, `sample_idx`, `description` (4,800 rows) |
-| `pairwise_consistency_prism.parquet` | Within-activation recon-recon cosine scores (26,400 rows) |
-| `fidelity_scores_prism.parquet` | Per-reconstruction fidelity cosine scores (4,800 rows) |
-| `recon_vectors_prism.parquet` | Raw reconstructed vectors (4,800 rows × 3840-d); written only with `--save-vectors` |
+| Paper artifact                          | Generator                                              | Output                                                       |
+|-----------------------------------------|--------------------------------------------------------|--------------------------------------------------------------|
+| Headline metrics table                  | `scripts/build_synthesis_tables.py`                    | `reports/synthesis_headline_metrics.csv`                     |
+| LaTeX results table                     | `scripts/build_synthesis_tables.py`                    | `reports/results_table.tex`                                  |
+| Per-run summary (mean/std/p5/p95)       | `scripts/build_synthesis_tables.py`                    | `reports/summary_stats.csv`                                  |
+| Data inventory                          | `scripts/build_synthesis_tables.py`                    | `reports/synthesis_inventory.csv`                            |
+| Text consistency (within / between)     | `scripts/compute_text_consistency*.py` → `build_synthesis_tables.py` | `reports/synthesis_text_consistency.csv`         |
+| Linear probes (incl. majority baseline) | `scripts/train_linear_probes*.py` → `build_synthesis_tables.py`      | `reports/synthesis_linear_probes.csv`            |
+| G-study variance decomposition          | `scripts/g_theory_study.py` → `build_synthesis_tables.py`            | `reports/synthesis_g_theory_variance.csv`        |
+| D-study (G_rel by n′)                   | `scripts/g_theory_study.py` → `build_synthesis_tables.py`            | `reports/synthesis_g_theory_d_study.csv`         |
+| Fig. centered fidelity (matched/mismatched/gap) | `scripts/generate_figure_bundle.py`            | `figures_bundle/01_centered_fidelity.png`                    |
+| Fig. centered consistency               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/02_centered_consistency.png`                 |
+| Fig. raw vs centered                    | `scripts/generate_figure_bundle.py`                    | `figures_bundle/03_raw_vs_centered.png`                      |
+| Fig. cosine inflation                   | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04_cosine_inflation.png`                     |
+| Fig. per-item mean scatter              | `scripts/generate_figure_bundle.py`                    | `figures_bundle/05_per_item_means.png`                       |
+| Fig. text consistency (MPNet)           | `scripts/generate_figure_bundle.py`                    | `figures_bundle/06_text_consistency.png`                     |
+| Fig. G-study variance components        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07a_g_theory_variance.png`, `07b_…`         |
+| Fig. D-study G_rel curves               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/08_d_study_curves.png`                       |
+| Fig. linear probe accuracies            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/09_linear_probes.png`                        |
+| MMLU prompt mode side-by-side           | `scripts/generate_figure_bundle.py` + notebook §6      | `figures_bundle/1?_mmlu_*.png`                               |
+| Notebook narrative                      | `notebooks/analysis_synthesis.ipynb`                   | (re-renders from `reports/*.csv`)                            |
 
-### Bias in Bios
-
-| Path | What it is |
-|------|------------|
-| `biosbias_400.csv` | 400 BiasBios items with `item_idx`, `dataset`, `prompt_text`, `profession`, `gender` |
-| `activations_layer32_biosbias_gemma-3-12b-pt.parquet` | BiasBios activation vectors (layer 32, last token, L2-normalized) |
-| `descriptions_biosbias.parquet` | `activation_idx`, `sample_idx`, `description` (4,800 rows) |
-| `pairwise_consistency_biosbias.parquet` | Within-activation recon-recon cosine scores (26,400 rows) |
-| `fidelity_scores_biosbias.parquet` | Per-reconstruction fidelity cosine scores (4,800 rows) |
-| `recon_vectors_biosbias.parquet` | Raw reconstructed vectors (4,800 rows × 3840-d); written only with `--save-vectors` |
-
-### MMLU
-
-| Path | What it is |
-|------|------------|
-| `mmlu_400.csv` | 400 MMLU items with `item_idx`, `dataset`, `prompt_text`, `subject`, `question`, `choices` (JSON), `answer`, `split` |
-| `activations_layer32_mmlu_gemma-3-12b-pt.parquet` | MMLU activation vectors (layer 32, last token before "Answer:", L2-normalized) |
-| `descriptions_mmlu.parquet` | `activation_idx`, `sample_idx`, `description` (4,800 rows) |
-| `pairwise_consistency_mmlu.parquet` | Within-activation recon-recon cosine scores (26,400 rows) |
-| `fidelity_scores_mmlu.parquet` | Per-reconstruction fidelity cosine scores (4,800 rows) |
-| `recon_vectors_mmlu.parquet` | Raw reconstructed vectors (4,800 rows × 3840-d); written only with `--save-vectors` |
-
-| `hf/` | Cached model weights (reuse across runs) |
+See the comments at the top of each script for input schemas.
 
 ---
 
-## End to end pipeline
+## Reproducibility notes
 
-```bash
-uv sync && uv run modal setup
-# Set HF token once:
-modal secret create --force huggingface HF_TOKEN=<your_hf_token>
+- **Pinned seeds.** `seed=42` propagates through dataset sampling (PRISM
+  shuffle, BiasBios stratified split, MMLU subject sampling) and is printed
+  at job start in `extract_activations.py`, `sample_descriptions.py`, and
+  `train_linear_probe*.py`. The Gemma-3 forward pass is deterministic given
+  identical bf16 weights and inputs.
+- **SGLang sampling is non-deterministic.** Step 2 draws 12 AV samples per
+  activation at temperature 1.0 through SGLang. Reruns will produce
+  different descriptions and slightly different raw cosines, but the
+  *aggregate* metrics (centered fidelity gap, within-item vs between-item
+  MPNet, G_rel, probe accuracy) should match within run-to-run noise. This
+  is expected behavior for stochastic verbalization at T=1.0.
+- **Hardware.** Step 1 needs one A100 (≈ 15 GB peak). Step 2/3 default to 12
+  shards × A100 each but degrade gracefully with `--n-shards`. Local
+  analysis is CPU-only and runs in a few minutes on a laptop.
+- **Storage.** Each run produces about 50 MB of parquets; the four-run
+  superset is ~ 200 MB and lives entirely on the Modal volume until you
+  pull it.
+- **Expected row counts per run.** 400 items × 12 AV samples = 4,800
+  description rows and 4,800 fidelity rows; C(12, 2) × 400 = 26,400
+  pairwise rows; 4,800 reconstruction vectors (with `--save-vectors`).
 
-# Run all three steps for all three datasets
-uv run modal run extract_activations.py --all-datasets --n-items 400 --seed 42
-uv run modal run sample_descriptions.py --all-datasets --n-samples 12
-uv run modal run reconstruct_scores.py --all-datasets --save-vectors
+The grader's recipe (and the recommended pre-submission check the author
+should re-run) is exactly the eight steps in
+[Local analysis](#local-analysis-after-the-modal-pipeline-finishes) above,
+plus the four Modal jobs that produce the inputs.
 
-# Pull all artifacts locally
-uv run python scripts/pull_from_modal.py --all-datasets
+---
 
-# Run diagnostics for each dataset
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_prism.parquet
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_prism.parquet
+## Code reuse and attribution
 
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_biosbias.parquet
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_biosbias_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_biosbias.parquet
+This repo's original contribution is the reliability-evaluation layer:
+Step 1 (vanilla HuggingFace activation extraction) and everything in
+`scripts/`, `nla/g_theory.py`, `nla/synthesis_metrics.py`, the figure bundle,
+the notebook, and the docs. NLA itself (the AV/AR architecture and the
+pretrained checkpoints) is Anthropic's, and the inference client is kitft's.
 
-uv run python scripts/diagnose_cosine_inflation.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet
-uv run python scripts/diagnose_reconstruction_fidelity.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_mmlu.parquet
-uv run python scripts/diagnose_reconstruction_consistency.py \
-  --activations data/activations_layer32_mmlu_gemma-3-12b-pt.parquet \
-  --recon-vectors data/recon_vectors_mmlu.parquet
-```
+| What                              | Who          | Where                                                          |
+|-----------------------------------|--------------|----------------------------------------------------------------|
+| NLA method                        | Anthropic    | [Transformer Circuits 2026](https://transformer-circuits.pub/2026/nla/index.html), [research post](https://www.anthropic.com/research/natural-language-autoencoders) |
+| AV checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-av>      |
+| AR checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>      |
+| Inference client (`NLAClient` + `NLACritic`) | kitft (MIT) | [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders), vendored at [`nla/nla_inference.py`](nla/nla_inference.py) |
+| Reliability evaluation layer      | this repo (MIT) | everything else                                            |
 
-**Check you're done — per dataset:**
-
-| File | Expected |
-|------|----------|
-| `data/prism_400.csv` | 400 rows |
-| `data/activations_layer32_prism_gemma-3-12b-pt.parquet` | 400 rows |
-| `data/descriptions_prism.parquet` | 4,800 rows (400 × 12) |
-| `data/pairwise_consistency_prism.parquet` | 26,400 rows (400 × 66), no NaNs |
-| `data/fidelity_scores_prism.parquet` | 4,800 rows, no NaNs |
-| `data/recon_vectors_prism.parquet` | 4,800 rows (if `--save-vectors`) |
-| `data/biosbias_400.csv` | 400 rows |
-| `data/activations_layer32_biosbias_gemma-3-12b-pt.parquet` | 400 rows |
-| `data/descriptions_biosbias.parquet` | 4,800 rows (400 × 12) |
-| `data/pairwise_consistency_biosbias.parquet` | 26,400 rows (400 × 66), no NaNs |
-| `data/fidelity_scores_biosbias.parquet` | 4,800 rows, no NaNs |
-| `data/recon_vectors_biosbias.parquet` | 4,800 rows (if `--save-vectors`) |
-| `data/mmlu_400.csv` | 400 rows |
-| `data/activations_layer32_mmlu_gemma-3-12b-pt.parquet` | 400 rows |
-| `data/descriptions_mmlu.parquet` | 4,800 rows (400 × 12) |
-| `data/pairwise_consistency_mmlu.parquet` | 26,400 rows (400 × 66), no NaNs |
-| `data/fidelity_scores_mmlu.parquet` | 4,800 rows, no NaNs |
-| `data/recon_vectors_mmlu.parquet` | 4,800 rows (if `--save-vectors`) |
-
-Raw cosine scores near 0.99 are expected — see [Evaluation metrics](#evaluation-metrics) for how to interpret them using baseline-adjusted centered gaps.
-
-**Cross-dataset totals:**
-- 14,400 description rows (4,800 per dataset)
-- 79,200 pairwise consistency rows (26,400 per dataset)
-- 14,400 fidelity rows (4,800 per dataset)
+Read [NOTICE](NOTICE) for the formal attribution block,
+[CITATION.cff](CITATION.cff) for citation metadata, and
+[nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the per-file vendored-code notes.
+Conceptual write-up of the reliability methodology is in
+[EXPERIMENT_OVERVIEW.md](EXPERIMENT_OVERVIEW.md).

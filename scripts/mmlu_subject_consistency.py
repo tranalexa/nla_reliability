@@ -7,22 +7,45 @@ baseline because same-subject pairs are structurally similar. This script
 separates them.
 
 Usage:
-  uv run python scripts/mmlu_subject_consistency.py
+  uv run python scripts/mmlu_subject_consistency.py --run-id mmlu_choice
+  uv run python scripts/mmlu_subject_consistency.py --run-id mmlu_nochoice
 """
+from __future__ import annotations
+
+import argparse
+import sys
 from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-DATA = Path(__file__).resolve().parents[1] / "data"
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from nla.paths import (  # noqa: E402
+    local_activations_path,
+    local_csv_path,
+    local_recon_vectors_path,
+    validate_run_id,
+)
+
 N_SAMPLE = 26_400  # match within-item pair count
 
 
 def main() -> None:
-    csv_df = pd.read_csv(DATA / "mmlu_400.csv")
-    act_df = pd.read_parquet(DATA / "activations_layer32_mmlu_gemma-3-12b-pt.parquet")
-    rv_df  = pd.read_parquet(DATA / "recon_vectors_mmlu.parquet")
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--run-id", default="mmlu_choice",
+                   help="MMLU run_id (mmlu_choice | mmlu_nochoice)")
+    args = p.parse_args()
+    validate_run_id(args.run_id)
+    if not args.run_id.startswith("mmlu"):
+        raise SystemExit("This diagnostic is MMLU-specific.")
+
+    csv_df = pd.read_csv(local_csv_path(args.run_id))
+    act_df = pd.read_parquet(local_activations_path(args.run_id))
+    rv_df  = pd.read_parquet(local_recon_vectors_path(args.run_id))
 
     subjects = sorted(csv_df["subject"].unique())
     subj_idxs = {s: csv_df[csv_df["subject"] == s]["item_idx"].values for s in subjects}

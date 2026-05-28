@@ -1,0 +1,94 @@
+nla_reliability — third-party attribution
+=========================================
+
+This work builds on **Natural Language Autoencoders (NLA)** introduced by
+Anthropic / Transformer Circuits.
+
+-----------------------------------------------------------------------------
+NLA method (architecture, training protocol, AV / AR pair)
+-----------------------------------------------------------------------------
+Fraser-Taliente, Kantamneni, Ong, et al.,
+"Natural Language Autoencoders Produce Unsupervised Explanations of LLM
+Activations", Transformer Circuits, 2026.
+
+  Paper:          https://transformer-circuits.pub/2026/nla/index.html
+  Research post:  https://www.anthropic.com/research/natural-language-autoencoders
+
+This repository does not retrain, fine-tune, or modify NLAs. It consumes
+pretrained Anthropic NLA checkpoints (below) as black boxes and adds a
+reliability evaluation layer on top (mean-centered cosines, MPNet text
+consistency, G-theory variance decomposition, linear probes, synthesis
+figures/tables).
+
+-----------------------------------------------------------------------------
+Pretrained NLA checkpoints (used unchanged)
+-----------------------------------------------------------------------------
+The AV and AR checkpoints below are Anthropic-released Gemma-3-12B layer-32
+NLAs, distributed via the kitft account on Hugging Face Hub.
+
+  AV (activation verbalizer)     kitft/nla-gemma3-12b-L32-av
+                                 https://huggingface.co/kitft/nla-gemma3-12b-L32-av
+                                 Used by `sample_descriptions.py` (Modal Step 2).
+
+  AR (activation reconstructor)  kitft/nla-gemma3-12b-L32-ar
+                                 https://huggingface.co/kitft/nla-gemma3-12b-L32-ar
+                                 Used by `reconstruct_scores.py` (Modal Step 3).
+
+-----------------------------------------------------------------------------
+Vendored inference client
+-----------------------------------------------------------------------------
+`nla/nla_inference.py` is vendored verbatim (subject to minor local diffs)
+from kitft's open-source reimplementation of the Anthropic NLA inference
+protocol. It is licensed under MIT by kitft.
+
+  Source:        https://github.com/kitft/natural_language_autoencoders
+  Upstream file: https://github.com/kitft/natural_language_autoencoders/blob/main/nla_inference.py
+
+The file provides BOTH halves of the NLA pair:
+
+  * `NLAClient`  — AV / activation verbalization via SGLang `input_embeds`.
+                   Used by this repo in `sample_descriptions.py` (Step 2).
+  * `NLACritic` — AR / activation reconstruction (pure torch, no SGLang).
+                   Used by this repo in `reconstruct_scores.py` (Step 3).
+
+See `nla/ATTRIBUTION.md` for per-file vendoring details.
+
+-----------------------------------------------------------------------------
+Base language model
+-----------------------------------------------------------------------------
+google/gemma-3-12b-pt
+  https://huggingface.co/google/gemma-3-12b-pt
+  Used in Step 1 (`extract_activations.py`) for the layer-32 forward pass.
+
+-----------------------------------------------------------------------------
+Datasets
+-----------------------------------------------------------------------------
+Transluce/PRISM-gender-Llama-3.1-8B-Instruct  (PRISM run)
+  https://huggingface.co/datasets/Transluce/PRISM-gender-Llama-3.1-8B-Instruct
+
+LabHC/bias_in_bios  (Bias in Bios run)
+  https://huggingface.co/datasets/LabHC/bias_in_bios
+
+cais/mmlu  (mmlu_choice + mmlu_nochoice runs)
+  https://huggingface.co/datasets/cais/mmlu
+
+-----------------------------------------------------------------------------
+Text-similarity model
+-----------------------------------------------------------------------------
+sentence-transformers/all-mpnet-base-v2  (text consistency MPNet)
+  https://huggingface.co/sentence-transformers/all-mpnet-base-v2
+
+-----------------------------------------------------------------------------
+Citation
+-----------------------------------------------------------------------------
+If you use this repository, please cite the NLA paper as well as this work:
+
+  @article{frasertaliente2026nla,
+    title  = {Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations},
+    author = {Fraser-Taliente, Cody and Kantamneni, Sanjana and Ong, Ben and others},
+    journal= {Transformer Circuits},
+    year   = {2026},
+    url    = {https://transformer-circuits.pub/2026/nla/index.html}
+  }
+
+See `CITATION.cff` for the machine-readable citation block.

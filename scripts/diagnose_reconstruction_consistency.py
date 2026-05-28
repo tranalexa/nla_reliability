@@ -37,11 +37,8 @@ Gap distribution:       N = 26 400 (each within pair is matched to exactly
                         distribution reported separately).
 
 Run:
-  uv run python scripts/diagnose_reconstruction_consistency.py
-  uv run python scripts/diagnose_reconstruction_consistency.py \\
-    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
-    --recon-vectors data/recon_vectors_prism.parquet \\
-    --n-between 5 --seed 42
+  uv run python scripts/diagnose_reconstruction_consistency.py --run-id prism
+  uv run python scripts/diagnose_reconstruction_consistency.py --run-id biosbias --n-between 10
 """
 from __future__ import annotations
 
@@ -55,10 +52,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-DATA = ROOT / "data"
+from nla.paths import (  # noqa: E402
+    local_activations_path,
+    local_recon_vectors_path,
+    validate_run_id,
+)
 
-DEFAULT_ACTIVATIONS   = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
-DEFAULT_RECON_VECTORS = DATA / "recon_vectors_prism.parquet"
+DEFAULT_RUN_ID = "prism"
 DEFAULT_N_BETWEEN     = 5
 DEFAULT_SEED          = 42
 _CHUNK                = 10_000   # rows per chunk for memory-safe cosine computation
@@ -149,18 +149,28 @@ def section(title: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--activations",   type=Path, default=DEFAULT_ACTIVATIONS)
-    ap.add_argument("--recon-vectors", type=Path, default=DEFAULT_RECON_VECTORS)
+    ap.add_argument("--run-id", default=DEFAULT_RUN_ID,
+                    help="Canonical run_id (prism | biosbias | mmlu_choice | mmlu_nochoice)")
+    ap.add_argument("--activations",   type=Path, default=None,
+                    help="Override activation parquet path (default: derived from --run-id)")
+    ap.add_argument("--recon-vectors", type=Path, default=None,
+                    help="Override reconstructed-vectors parquet path (default: from --run-id)")
     ap.add_argument("--n-between", type=int, default=DEFAULT_N_BETWEEN,
                     help="Between-item pairs = n_between × within-item pairs (default 5)")
     ap.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = ap.parse_args()
+
+    validate_run_id(args.run_id)
+    args.activations = args.activations or local_activations_path(args.run_id)
+    args.recon_vectors = args.recon_vectors or local_recon_vectors_path(args.run_id)
 
     missing = [f for f in (args.activations, args.recon_vectors) if not f.exists()]
     if missing:
         print("ERROR: missing input files:")
         for f in missing:
             print(f"  {f}")
+        print()
+        print(f"Pull from Modal: uv run python scripts/pull_from_modal.py --run-id {args.run_id}")
         sys.exit(1)
 
     rng = np.random.default_rng(args.seed)

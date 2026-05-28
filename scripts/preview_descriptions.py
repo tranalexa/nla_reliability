@@ -1,14 +1,12 @@
 """Preview AV descriptions alongside the matching prompt text.
 
-Reads descriptions and item CSV from data/ (pull with scripts/pull_from_modal.py).
+Reads ``data/runs/<run_id>/descriptions_<dataset>.parquet`` and the matching
+item CSV (pull with ``scripts/pull_from_modal.py --run-id <run_id>``).
 
 Usage:
-  uv run python scripts/preview_descriptions.py --dataset prism
-  uv run python scripts/preview_descriptions.py --dataset biosbias
-  uv run python scripts/preview_descriptions.py --dataset prism -n 10
-  uv run python scripts/preview_descriptions.py \\
-    --descriptions data/descriptions_prism.parquet \\
-    --prompts data/prism_400.csv
+  uv run python scripts/preview_descriptions.py --run-id prism
+  uv run python scripts/preview_descriptions.py --run-id biosbias -n 10
+  uv run python scripts/preview_descriptions.py --run-id mmlu_choice
 """
 
 import argparse
@@ -21,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from nla.paths import (  # noqa: E402
-    DATA_DIR,
+    RUN_IDS,
     local_csv_path,
     local_descriptions_path,
 )
@@ -84,21 +82,22 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
-        "--dataset",
+        "--run-id",
         default="prism",
-        help="dataset name for default path inference (default: prism)",
+        choices=list(RUN_IDS),
+        help="run to preview (default: prism)",
     )
     p.add_argument(
         "--descriptions",
         type=Path,
         default=None,
-        help="path to descriptions parquet (default: inferred from --dataset)",
+        help="path to descriptions parquet (default: inferred from --run-id)",
     )
     p.add_argument(
         "--prompts",
         type=Path,
         default=None,
-        help="path to items CSV (default: inferred from --dataset)",
+        help="path to items CSV (default: inferred from --run-id)",
     )
     p.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("-n", type=int, default=10, help="description rows to sample (default: 10)")
@@ -107,16 +106,16 @@ def main() -> None:
                    help="items count used in Step 1 (for CSV filename, default: 400)")
     args = p.parse_args()
 
-    descriptions_path = args.descriptions or local_descriptions_path(args.dataset)
-    prompts_path = args.prompts or local_csv_path(args.dataset, args.n_items)
+    descriptions_path = args.descriptions or local_descriptions_path(args.run_id)
+    prompts_path = args.prompts or local_csv_path(args.run_id, args.n_items)
 
     if not descriptions_path.exists():
         print(f"ERROR: {descriptions_path} not found. Pull it first:")
-        print(f"  uv run python scripts/pull_from_modal.py --dataset {args.dataset}")
+        print(f"  uv run python scripts/pull_from_modal.py --run-id {args.run_id}")
         sys.exit(1)
     if not prompts_path.exists():
         print(f"ERROR: {prompts_path} not found. Pull it first:")
-        print(f"  uv run python scripts/pull_from_modal.py --dataset {args.dataset}")
+        print(f"  uv run python scripts/pull_from_modal.py --run-id {args.run_id}")
         sys.exit(1)
 
     merged = load_merged(descriptions_path, prompts_path)
@@ -127,7 +126,7 @@ def main() -> None:
 
     header = (
         f"NLA description preview ({n} samples, seed={args.seed})\n"
-        f"dataset:      {args.dataset}\n"
+        f"run_id:       {args.run_id}\n"
         f"descriptions: {descriptions_path}\n"
         f"prompts:      {prompts_path}\n"
         f"total rows:   {len(merged)}\n"

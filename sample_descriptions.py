@@ -1,15 +1,27 @@
 """Step 2: sample AV descriptions from activations via SGLang + NLAClient on Modal.
 
+Uses **Anthropic NLA** infrastructure: the AV (activation verbalizer) checkpoint
+``kitft/nla-gemma3-12b-L32-av`` released by Anthropic and the vendored
+``NLAClient`` from kitft/natural_language_autoencoders (see
+``nla/ATTRIBUTION.md``). The client injects each pre-extracted activation
+vector into SGLang as a custom input embedding and streams ``n_samples``
+stochastic descriptions per activation at temperature 1.0.
+
 Prerequisites:
-  1. Step 1 done on nla-cache (activation parquets on volume)
-  2. Accept license for kitft/nla-gemma3-12b-L32-av on HuggingFace
+  1. Step 1 completed (run-specific activations parquet on volume)
+  2. License accepted for kitft/nla-gemma3-12b-L32-av on HuggingFace
   3. modal secret create --force huggingface HF_TOKEN=<token>
 
 Run:
-  uv run modal run sample_descriptions.py --dataset prism
-  uv run modal run sample_descriptions.py --dataset biosbias
-  uv run modal run sample_descriptions.py --all-datasets
-  uv run modal run sample_descriptions.py --all-datasets --n-samples 12 --n-shards 12
+  uv run modal run sample_descriptions.py --run-id prism
+  uv run modal run sample_descriptions.py --run-id biosbias
+  uv run modal run sample_descriptions.py --run-id mmlu_choice
+  uv run modal run sample_descriptions.py --run-id mmlu_nochoice
+  uv run modal run sample_descriptions.py --all-runs --n-samples 12
+
+Random seed: SGLang sampling at temperature 1.0 is **not** bit-identical across
+hardware. Reruns will produce different descriptions but should match in
+aggregate (within-item / between-item MPNet cosine + reliability ranking).
 """
 
 import os
@@ -62,8 +74,9 @@ image = (
 )
 
 
-def shard_parquet(shard_id: int, dataset: str) -> str:
-    return f"{CACHE}/descriptions_{dataset}_shard{shard_id}.parquet"
+def shard_parquet(shard_id: int, run_id: str, dataset: str) -> str:
+    """Per-shard temp parquet path on the volume."""
+    return f"{CACHE}/runs/{run_id}/descriptions_{dataset}_shard{shard_id}.parquet"
 
 
 def setup_hf_cache() -> None:
@@ -86,6 +99,7 @@ def hf_token() -> str:
 
 
 def download_av() -> str:
+    """Snapshot-download the Anthropic AV checkpoint to the volume HF cache."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import HfHubHTTPError
 
@@ -123,7 +137,7 @@ def wait_ready(process: subprocess.Popen, timeout: int = READY_TIMEOUT) -> None:
             if process.poll() is not None:
                 raise RuntimeError(
                     f"SGLang exited with code {process.returncode} "
-                    "(often -9/OOM or CUDA graph failure — check logs above)"
+                    "(often -9/OOM or CUDA graph failure - check logs above)"
                 )
             try:
                 http.get(f"{SGLANG_URL}/health", timeout=5.0).raise_for_status()
@@ -134,6 +148,7 @@ def wait_ready(process: subprocess.Popen, timeout: int = READY_TIMEOUT) -> None:
 
 
 def _make_client(av_dir: str):
+    """Build an NLAClient with a higher-concurrency HTTP client for SGLang."""
     import numpy as np
     import torch
     from nla.nla_inference import NLAClient
@@ -175,6 +190,8 @@ def _draw(client, embeds_np) -> str:
 
 
 class _EmbedCache:
+    """Thread-safe cache of NLAClient-built input embeddings, keyed by activation_idx."""
+
     def __init__(self, client, np, torch):
         self._client = client
         self._np = np
@@ -206,7 +223,15 @@ def _one_sample(cache: _EmbedCache, client, activation_idx: int, sample_idx: int
     volumes={CACHE: vol},
     secrets=[modal.Secret.from_name("huggingface")],
 )
-def run_shard(shard_id: int, n_shards: int, activations_parquet: str, dataset: str, n_samples: int):
+def run_shard(
+    shard_id: int,
+    n_shards: int,
+    activations_parquet: str,
+    run_id: str,
+    dataset: str,
+    n_samples: int,
+):
+    """One GPU shard: serve SGLang locally and emit AV descriptions for ``shard_id mod n_shards``."""
     sys.path.insert(0, "/root")
 
     vol.reload()
@@ -214,7 +239,7 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str, dataset: s
 
     if not Path(activations_parquet).exists():
         raise FileNotFoundError(
-            f"missing {activations_parquet} — run extract_activations.py first"
+            f"missing {activations_parquet} - run extract_activations.py first"
         )
 
     table = pq.read_table(activations_parquet)
@@ -224,7 +249,8 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str, dataset: s
         raise ValueError(f"empty {activations_parquet}")
 
     indices = [i for i in range(n_activations) if i % n_shards == shard_id]
-    out_path = shard_parquet(shard_id, dataset)
+    out_path = shard_parquet(shard_id, run_id, dataset)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     print(
         f"shard {shard_id}/{n_shards}: {len(indices)} activations "
         f"from {activations_parquet} -> {out_path}"
@@ -240,7 +266,7 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str, dataset: s
         cache = _EmbedCache(client, np, torch)
         print(
             f"shard {shard_id}: concurrency={CONCURRENCY} "
-            f"max_new_tokens={MAX_NEW_TOKENS} n_samples={n_samples}"
+            f"max_new_tokens={MAX_NEW_TOKENS} n_samples={n_samples} temperature={TEMPERATURE}"
         )
 
         total = len(indices) * n_samples
@@ -271,18 +297,20 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str, dataset: s
     timeout=600,
     volumes={CACHE: vol},
 )
-def merge_shards(n_shards: int, dataset: str, output_parquet: str, n_samples: int):
+def merge_shards(n_shards: int, run_id: str, dataset: str, output_parquet: str, n_samples: int):
+    """Concatenate per-shard parquets into the final descriptions parquet for this run."""
     vol.reload()
     out = Path(output_parquet)
+    out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
         print(f"removed stale {output_parquet}")
 
     dfs = []
     for shard_id in range(n_shards):
-        path = shard_parquet(shard_id, dataset)
+        path = shard_parquet(shard_id, run_id, dataset)
         if not Path(path).exists():
-            raise FileNotFoundError(f"missing {path} — shard {shard_id} did not finish")
+            raise FileNotFoundError(f"missing {path} - shard {shard_id} did not finish")
         dfs.append(pd.read_parquet(path))
 
     df = pd.concat(dfs, ignore_index=True)
@@ -290,25 +318,32 @@ def merge_shards(n_shards: int, dataset: str, output_parquet: str, n_samples: in
     n_act = df["activation_idx"].nunique()
     expected = n_act * n_samples
     assert len(df) == expected, (
-        f"expected {expected} rows ({n_act} activations × {n_samples}), got {len(df)}"
+        f"expected {expected} rows ({n_act} activations x {n_samples}), got {len(df)}"
     )
     df.to_parquet(output_parquet, index=False)
     vol.commit()
     print(f"merged {len(df)} rows -> {output_parquet}")
 
 
-def _run_one_dataset(dataset: str, n_shards: int, n_samples: int) -> None:
-    """Run shards and merge for a single dataset (called from the local entrypoint)."""
+def _run_one(run_id: str, n_shards: int, n_samples: int) -> None:
+    """Drive shards + merge for a single run_id."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from nla.paths import volume_activations_path, volume_descriptions_path
+    from nla.paths import (
+        dataset_for_run,
+        volume_activations_path,
+        volume_descriptions_path,
+    )
 
-    activations_parquet = volume_activations_path(dataset)
-    output_parquet = volume_descriptions_path(dataset)
+    dataset = dataset_for_run(run_id)
+    activations_parquet = volume_activations_path(run_id)
+    output_parquet = volume_descriptions_path(run_id)
 
-    print(f"\n=== Sampling descriptions: {dataset} ===")
+    print(f"\n=== Sampling descriptions: {run_id} ({dataset}) ===")
     print(f"  activations: {activations_parquet}")
     print(f"  output:      {output_parquet}")
     print(f"  n_samples:   {n_samples}  n_shards: {n_shards}")
+    print(f"  temperature: {TEMPERATURE}  (no seed: SGLang T={TEMPERATURE} sampling is")
+    print( "               non-deterministic across hardware; reruns will differ)")
 
     list(
         run_shard.map(
@@ -316,6 +351,7 @@ def _run_one_dataset(dataset: str, n_shards: int, n_samples: int) -> None:
             kwargs={
                 "n_shards": n_shards,
                 "activations_parquet": activations_parquet,
+                "run_id": run_id,
                 "dataset": dataset,
                 "n_samples": n_samples,
             },
@@ -323,6 +359,7 @@ def _run_one_dataset(dataset: str, n_shards: int, n_samples: int) -> None:
     )
     merge_shards.remote(
         n_shards=n_shards,
+        run_id=run_id,
         dataset=dataset,
         output_parquet=output_parquet,
         n_samples=n_samples,
@@ -331,20 +368,21 @@ def _run_one_dataset(dataset: str, n_shards: int, n_samples: int) -> None:
 
 @app.local_entrypoint()
 def main(
-    dataset: str = "prism",
-    all_datasets: bool = False,
+    run_id: str = "prism",
+    all_runs: bool = False,
     n_shards: int = N_SHARDS_DEFAULT,
     n_samples: int = N_SAMPLES_DEFAULT,
 ):
     """
-    --dataset       prism | biosbias  (default: prism)
-    --all-datasets  run both datasets in sequence
-    --n-shards      parallel GPU workers per dataset (default: 12)
-    --n-samples     AV samples per activation (default: 12)
+    --run-id     prism | biosbias | mmlu_choice | mmlu_nochoice  (default: prism)
+    --all-runs   run all four canonical runs in sequence
+    --n-shards   parallel GPU workers per run (default: 12)
+    --n-samples  AV samples per activation (default: 12)
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from nla.datasets import SUPPORTED_DATASETS
+    from nla.paths import RUN_IDS, validate_run_id
 
-    datasets = SUPPORTED_DATASETS if all_datasets else [dataset]
-    for ds in datasets:
-        _run_one_dataset(ds, n_shards=n_shards, n_samples=n_samples)
+    runs = list(RUN_IDS) if all_runs else [run_id]
+    for r in runs:
+        validate_run_id(r)
+        _run_one(r, n_shards=n_shards, n_samples=n_samples)

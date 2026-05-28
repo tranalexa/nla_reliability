@@ -38,12 +38,9 @@ to save the raw reconstructed vectors. This script covers the original-side
 diagnostics and the saved reconstruction-side cosine distributions.
 
 Run:
-  # First pull activations if not in data/:
-  modal volume get nla-cache activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet \\
-    data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet
-
-  uv run python scripts/diagnose_cosine_inflation.py
-  uv run python scripts/diagnose_cosine_inflation.py --n-pairs 10000
+  uv run python scripts/pull_from_modal.py --run-id prism      # if not already local
+  uv run python scripts/diagnose_cosine_inflation.py --run-id prism
+  uv run python scripts/diagnose_cosine_inflation.py --run-id biosbias --n-pairs 10000
 """
 from __future__ import annotations
 
@@ -57,12 +54,14 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-DATA = ROOT / "data"
+from nla.paths import (  # noqa: E402
+    local_activations_path,
+    local_fidelity_path,
+    local_pairwise_path,
+    validate_run_id,
+)
 
-# ── defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
-DEFAULT_PAIRWISE = DATA / "pairwise_consistency_prism.parquet"
-DEFAULT_FIDELITY = DATA / "fidelity_scores_prism.parquet"
+DEFAULT_RUN_ID = "prism"
 DEFAULT_N_PAIRS = 5000
 DEFAULT_SEED = 42
 
@@ -105,31 +104,36 @@ def section(title: str) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--activations", type=Path, default=DEFAULT_ACTIVATIONS,
-                   help="Activation vectors parquet (Step 1 output)")
-    p.add_argument("--pairwise", type=Path, default=DEFAULT_PAIRWISE,
-                   help="Pairwise consistency parquet (Step 3 output)")
-    p.add_argument("--fidelity", type=Path, default=DEFAULT_FIDELITY,
-                   help="Fidelity scores parquet (Step 3 output)")
+    p.add_argument("--run-id", default=DEFAULT_RUN_ID,
+                   help="Canonical run_id (prism | biosbias | mmlu_choice | mmlu_nochoice)")
+    p.add_argument("--activations", type=Path, default=None,
+                   help="Override activation parquet path (default: derived from --run-id)")
+    p.add_argument("--pairwise", type=Path, default=None,
+                   help="Override pairwise consistency parquet path (default: from --run-id)")
+    p.add_argument("--fidelity", type=Path, default=None,
+                   help="Override fidelity scores parquet path (default: from --run-id)")
     p.add_argument("--n-pairs", type=int, default=DEFAULT_N_PAIRS,
                    help="Number of random pairs to sample for orig-orig comparisons")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = p.parse_args()
 
-    # ── check prerequisites ───────────────────────────────────────────────────
-    missing = [f for f in [args.activations, args.pairwise, args.fidelity]
-               if not f.exists()]
+    validate_run_id(args.run_id)
+    activations = args.activations or local_activations_path(args.run_id)
+    pairwise = args.pairwise or local_pairwise_path(args.run_id)
+    fidelity = args.fidelity or local_fidelity_path(args.run_id)
+
+    missing = [f for f in [activations, pairwise, fidelity] if not f.exists()]
     if missing:
         print("ERROR: missing input files:")
         for f in missing:
             print(f"  {f}")
-        if args.activations in missing:
-            print()
-            print("Pull activations from Modal:")
-            print("  modal volume get nla-cache "
-                  "activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet "
-                  "data/activations_layer32_persona-only_prism_gemma-3-12b-pt.parquet")
+        print()
+        print(f"Pull from Modal first: uv run python scripts/pull_from_modal.py --run-id {args.run_id}")
         sys.exit(1)
+
+    args.activations = activations
+    args.pairwise = pairwise
+    args.fidelity = fidelity
 
     rng = np.random.default_rng(args.seed)
 

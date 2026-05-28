@@ -1,16 +1,32 @@
-# nla_inference.py — vendored from the Natural Language Autoencoders (NLA) reference implementation.
+# nla_inference.py
+# ─────────────────────────────────────────────────────────────────────────────
+# VENDORED FROM kitft/natural_language_autoencoders (MIT) — same filename on main:
+#   https://github.com/kitft/natural_language_autoencoders/blob/main/nla_inference.py
 #
-# Upstream: https://github.com/kitft/natural_language_autoencoders
-#   (same filename on main: nla_inference.py)
-#
-# Describes the method from Anthropic / Transformer Circuits (2026):
+# Implements ANTHROPIC's Natural Language Autoencoder (NLA) inference, from:
 #   Fraser-Taliente, Kantamneni, Ong, et al.,
 #   "Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations"
-#   https://transformer-circuits.pub/2026/nla/index.html
-#   https://www.anthropic.com/research/natural-language-autoencoders
+#   Transformer Circuits, 2026.
+#   Paper:          https://transformer-circuits.pub/2026/nla/index.html
+#   Research post:  https://www.anthropic.com/research/natural-language-autoencoders
 #
-# This repo uses it for Modal Step 2 (activation verbalizer via SGLang). Prefer upstream
-# for bugfixes; keep local diffs minimal. See README "Attribution".
+# This file exposes BOTH halves of the NLA pair:
+#
+#   NLAClient   (Activation Verbalizer / AV) — vector → text via SGLang input_embeds.
+#               Used in this repo by `sample_descriptions.py` (Modal Step 2).
+#
+#   NLACritic   (Activation Reconstructor / AR) — text → vector via pure-torch
+#               truncated transformer with a (d, d) projection head.
+#               Used in this repo by `reconstruct_scores.py` (Modal Step 3).
+#
+# Both checkpoints used by this repo are Anthropic-released via kitft's HF account:
+#   kitft/nla-gemma3-12b-L32-av  (AV)
+#   kitft/nla-gemma3-12b-L32-ar  (AR)
+#
+# Local diffs from upstream are intentionally minimal; prefer upstream for
+# bugfixes and re-vendor. See `nla/ATTRIBUTION.md` and the top-level `NOTICE`
+# for the full attribution stack.
+# ─────────────────────────────────────────────────────────────────────────────
 
 """NLA actor inference via SGLang input_embeds — single-file, no nla package deps.
 

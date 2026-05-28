@@ -1,16 +1,31 @@
-"""Step 3: AR reconstruction, pairwise consistency, and fidelity on Modal.
+"""Step 3: AR reconstruction + pairwise consistency + fidelity scoring on Modal.
+
+Uses **Anthropic NLA** infrastructure: the AR (activation reconstructor)
+checkpoint ``kitft/nla-gemma3-12b-L32-ar`` released by Anthropic and the
+vendored ``NLACritic`` from kitft/natural_language_autoencoders (see
+``nla/ATTRIBUTION.md``). NLACritic takes each AV description, regenerates an
+activation vector, and we compare it to:
+
+  * the matching original activation (fidelity_cos), and
+  * each of the other 11 reconstructions of the same activation (pairwise cos).
+
+Outputs per run on the Modal volume:
+
+  /cache/runs/<run_id>/pairwise_consistency_<dataset>.parquet     (~26,400 rows)
+  /cache/runs/<run_id>/fidelity_scores_<dataset>.parquet          (~4,800 rows)
+  /cache/runs/<run_id>/recon_vectors_<dataset>.parquet            (with --save-vectors)
 
 Prerequisites:
-  1. Step 1 activation parquets on nla-cache
-  2. Step 2 descriptions parquets on nla-cache
-  3. Accept license for kitft/nla-gemma3-12b-L32-ar on HuggingFace
-  4. modal secret create --force huggingface HF_TOKEN=<token>
+  1. Step 1 + Step 2 completed for this run_id (volume parquets present).
+  2. License accepted for kitft/nla-gemma3-12b-L32-ar on HuggingFace.
+  3. modal secret create --force huggingface HF_TOKEN=<token>
 
 Run:
-  uv run modal run reconstruct_scores.py --dataset prism --save-vectors
-  uv run modal run reconstruct_scores.py --dataset biosbias --save-vectors
-  uv run modal run reconstruct_scores.py --all-datasets --save-vectors
-  uv run modal run reconstruct_scores.py --all-datasets --save-vectors --n-shards 12
+  uv run modal run reconstruct_scores.py --run-id prism --save-vectors
+  uv run modal run reconstruct_scores.py --run-id biosbias --save-vectors
+  uv run modal run reconstruct_scores.py --run-id mmlu_choice --save-vectors
+  uv run modal run reconstruct_scores.py --run-id mmlu_nochoice --save-vectors
+  uv run modal run reconstruct_scores.py --all-runs --save-vectors
 """
 
 import os
@@ -55,16 +70,16 @@ image = (
 )
 
 
-def pairwise_shard_parquet(shard_id: int, dataset: str) -> str:
-    return f"{CACHE}/pairwise_consistency_{dataset}_shard{shard_id}.parquet"
+def pairwise_shard_parquet(shard_id: int, run_id: str, dataset: str) -> str:
+    return f"{CACHE}/runs/{run_id}/pairwise_consistency_{dataset}_shard{shard_id}.parquet"
 
 
-def fidelity_shard_parquet(shard_id: int, dataset: str) -> str:
-    return f"{CACHE}/fidelity_scores_{dataset}_shard{shard_id}.parquet"
+def fidelity_shard_parquet(shard_id: int, run_id: str, dataset: str) -> str:
+    return f"{CACHE}/runs/{run_id}/fidelity_scores_{dataset}_shard{shard_id}.parquet"
 
 
-def vectors_shard_parquet(shard_id: int, dataset: str) -> str:
-    return f"{CACHE}/recon_vectors_{dataset}_shard{shard_id}.parquet"
+def vectors_shard_parquet(shard_id: int, run_id: str, dataset: str) -> str:
+    return f"{CACHE}/runs/{run_id}/recon_vectors_{dataset}_shard{shard_id}.parquet"
 
 
 def setup_hf_cache() -> None:
@@ -87,6 +102,7 @@ def hf_token() -> str:
 
 
 def download_ar() -> str:
+    """Snapshot-download the Anthropic AR checkpoint to the volume HF cache."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import HfHubHTTPError
 
@@ -105,6 +121,7 @@ def download_ar() -> str:
 
 
 def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two raw float vectors."""
     a = a / np.linalg.norm(a)
     b = b / np.linalg.norm(b)
     return float(np.dot(a, b))
@@ -120,6 +137,7 @@ def _process_shard(
     n_samples: int,
     save_vectors: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, "pd.DataFrame | None"]:
+    """Reconstruct + score one shard's worth of activations."""
     pairwise_rows: list[dict] = []
     fidelity_rows: list[dict] = []
     vector_rows: list[dict] | None = [] if save_vectors else None
@@ -143,6 +161,7 @@ def _process_shard(
 
         vecs = [critic.reconstruct(d).numpy() for d in descs]
 
+        # All C(n_samples, 2) within-item pairs.
         for i, j in combinations(range(n_samples), 2):
             pairwise_rows.append(
                 {
@@ -153,6 +172,7 @@ def _process_shard(
                 }
             )
 
+        # Per-sample fidelity vs the matching original.
         for sample_idx, vec in zip(sample_idxs, vecs):
             fidelity_rows.append(
                 {
@@ -199,11 +219,13 @@ def run_shard(
     n_shards: int,
     activations_parquet: str,
     descriptions_parquet: str,
+    run_id: str,
     dataset: str,
     n_items: int,
     n_samples: int,
     save_vectors: bool = False,
 ):
+    """One GPU shard: load AR checkpoint, reconstruct + score activations modulo shard."""
     sys.path.insert(0, "/root")
     from nla.nla_inference import NLACritic
 
@@ -231,8 +253,9 @@ def run_shard(
         raise ValueError(f"descriptions missing some activation_idx 0..{n_items - 1}")
 
     indices = [i for i in range(n_items) if i % n_shards == shard_id]
-    pairwise_path = pairwise_shard_parquet(shard_id, dataset)
-    fidelity_path = fidelity_shard_parquet(shard_id, dataset)
+    pairwise_path = pairwise_shard_parquet(shard_id, run_id, dataset)
+    fidelity_path = fidelity_shard_parquet(shard_id, run_id, dataset)
+    Path(pairwise_path).parent.mkdir(parents=True, exist_ok=True)
     print(
         f"shard {shard_id}/{n_shards}: {len(indices)} activations "
         f"from {activations_parquet} -> {pairwise_path}, {fidelity_path}"
@@ -247,7 +270,7 @@ def run_shard(
     pairwise_df.to_parquet(pairwise_path, index=False)
     fidelity_df.to_parquet(fidelity_path, index=False)
     if save_vectors and vectors_df is not None:
-        vectors_path = vectors_shard_parquet(shard_id, dataset)
+        vectors_path = vectors_shard_parquet(shard_id, run_id, dataset)
         vectors_df.to_parquet(vectors_path, index=False)
     vol.commit()
     print(
@@ -264,6 +287,7 @@ def run_shard(
 )
 def merge_shards(
     n_shards: int,
+    run_id: str,
     dataset: str,
     pairwise_out: str,
     fidelity_out: str,
@@ -272,11 +296,13 @@ def merge_shards(
     n_samples: int,
     save_vectors: bool,
 ):
+    """Concatenate per-shard parquets into the canonical run outputs and sanity-check."""
     vol.reload()
     n_pairs = len(list(combinations(range(n_samples), 2)))
 
     for path in (pairwise_out, fidelity_out):
         p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
         if p.exists():
             p.unlink()
             print(f"removed stale {path}")
@@ -287,21 +313,21 @@ def merge_shards(
     pairwise_dfs = []
     fidelity_dfs = []
     vectors_dfs = []
-    has_vectors = save_vectors and Path(vectors_shard_parquet(0, dataset)).exists()
+    has_vectors = save_vectors and Path(vectors_shard_parquet(0, run_id, dataset)).exists()
 
     for shard_id in range(n_shards):
-        pw = pairwise_shard_parquet(shard_id, dataset)
-        fid = fidelity_shard_parquet(shard_id, dataset)
+        pw = pairwise_shard_parquet(shard_id, run_id, dataset)
+        fid = fidelity_shard_parquet(shard_id, run_id, dataset)
         if not Path(pw).exists():
-            raise FileNotFoundError(f"missing {pw} — shard {shard_id} did not finish")
+            raise FileNotFoundError(f"missing {pw} - shard {shard_id} did not finish")
         if not Path(fid).exists():
-            raise FileNotFoundError(f"missing {fid} — shard {shard_id} did not finish")
+            raise FileNotFoundError(f"missing {fid} - shard {shard_id} did not finish")
         pairwise_dfs.append(pd.read_parquet(pw))
         fidelity_dfs.append(pd.read_parquet(fid))
         if has_vectors:
-            vp = vectors_shard_parquet(shard_id, dataset)
+            vp = vectors_shard_parquet(shard_id, run_id, dataset)
             if not Path(vp).exists():
-                raise FileNotFoundError(f"missing {vp} — shard {shard_id} did not finish")
+                raise FileNotFoundError(f"missing {vp} - shard {shard_id} did not finish")
             vectors_dfs.append(pd.read_parquet(vp))
 
     pairwise_df = pd.concat(pairwise_dfs, ignore_index=True)
@@ -342,16 +368,17 @@ def merge_shards(
     print(f"any NaN in fidelity:   {fidelity_df['fidelity_cos'].isna().any()}")
 
 
-def _run_one_dataset(
-    dataset: str,
+def _run_one(
+    run_id: str,
     n_shards: int,
     n_items: int,
     n_samples: int,
     save_vectors: bool,
 ) -> None:
-    """Run shards and merge for a single dataset (called from the local entrypoint)."""
+    """Drive shards + merge for a single run_id."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from nla.paths import (
+        dataset_for_run,
         volume_activations_path,
         volume_descriptions_path,
         volume_fidelity_path,
@@ -359,13 +386,14 @@ def _run_one_dataset(
         volume_recon_vectors_path,
     )
 
-    activations_parquet = volume_activations_path(dataset)
-    descriptions_parquet = volume_descriptions_path(dataset)
-    pairwise_out = volume_pairwise_path(dataset)
-    fidelity_out = volume_fidelity_path(dataset)
-    vectors_out = volume_recon_vectors_path(dataset) if save_vectors else ""
+    dataset = dataset_for_run(run_id)
+    activations_parquet = volume_activations_path(run_id)
+    descriptions_parquet = volume_descriptions_path(run_id)
+    pairwise_out = volume_pairwise_path(run_id)
+    fidelity_out = volume_fidelity_path(run_id)
+    vectors_out = volume_recon_vectors_path(run_id) if save_vectors else ""
 
-    print(f"\n=== Reconstructing scores: {dataset} ===")
+    print(f"\n=== Reconstructing scores: {run_id} ({dataset}) ===")
     print(f"  activations:  {activations_parquet}")
     print(f"  descriptions: {descriptions_parquet}")
     print(f"  pairwise_out: {pairwise_out}")
@@ -382,6 +410,7 @@ def _run_one_dataset(
                 "n_shards": n_shards,
                 "activations_parquet": activations_parquet,
                 "descriptions_parquet": descriptions_parquet,
+                "run_id": run_id,
                 "dataset": dataset,
                 "n_items": n_items,
                 "n_samples": n_samples,
@@ -391,6 +420,7 @@ def _run_one_dataset(
     )
     merge_shards.remote(
         n_shards=n_shards,
+        run_id=run_id,
         dataset=dataset,
         pairwise_out=pairwise_out,
         fidelity_out=fidelity_out,
@@ -403,28 +433,29 @@ def _run_one_dataset(
 
 @app.local_entrypoint()
 def main(
-    dataset: str = "prism",
-    all_datasets: bool = False,
+    run_id: str = "prism",
+    all_runs: bool = False,
     n_shards: int = N_SHARDS_DEFAULT,
     n_items: int = N_ITEMS,
     n_samples: int = N_SAMPLES,
     save_vectors: bool = False,
 ):
     """
-    --dataset       prism | biosbias  (default: prism)
-    --all-datasets  run both datasets in sequence
-    --save-vectors  also save raw reconstructed vectors (required for diagnostics)
-    --n-shards      parallel GPU workers per dataset (default: 12)
-    --n-items       items per dataset (default: 400; must match Step 1)
+    --run-id        prism | biosbias | mmlu_choice | mmlu_nochoice  (default: prism)
+    --all-runs      run all four canonical runs in sequence
+    --save-vectors  also save raw reconstructed vectors (required for centered diagnostics)
+    --n-shards      parallel GPU workers per run (default: 12)
+    --n-items       items per run (default: 400; must match Step 1)
     --n-samples     AV samples per activation (default: 12; must match Step 2)
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from nla.datasets import SUPPORTED_DATASETS
+    from nla.paths import RUN_IDS, validate_run_id
 
-    datasets = SUPPORTED_DATASETS if all_datasets else [dataset]
-    for ds in datasets:
-        _run_one_dataset(
-            dataset=ds,
+    runs = list(RUN_IDS) if all_runs else [run_id]
+    for r in runs:
+        validate_run_id(r)
+        _run_one(
+            run_id=r,
             n_shards=n_shards,
             n_items=n_items,
             n_samples=n_samples,

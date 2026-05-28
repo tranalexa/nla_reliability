@@ -1,15 +1,26 @@
 """Generalizability theory helpers for p × i designs (activations × AV samples).
 
-Design: n_p activations × n_i stochastic AV samples, one fidelity score per cell.
-Both facets are random.
+Design: ``n_p`` activations × ``n_i`` stochastic AV samples, one cosine score
+per cell. Both facets are treated as random. Used here for the two reliability
+metrics:
 
-Variance components (expected mean squares):
-  σ²_p  — between activations
-  σ²_i  — between sample occasions (global AV bias)
-  σ²_pi — activation × sample interaction
+  * ``fidelity_cos``     — cosine(reconstruction, original activation)
+  * ``consistency_cos``  — per-sample mean within-item recon cosine
 
-G_rel(n′) — dependability for ranking activations when each score is the
-            mean of n′ samples (out of n_i).
+Variance components (estimated from expected mean squares of a two-way random
+ANOVA):
+
+  σ²_p  — between activations (signal we want to rank by)
+  σ²_i  — between sample occasions (global AV bias across all activations)
+  σ²_pi — activation × sample interaction (residual)
+
+``G_rel(n')`` — dependability of the mean of ``n'`` samples as an estimator of
+the activation's true score; used as the D-study reliability curve.
+
+This module is **not** vendored. It is pure-Python / pandas / numpy and
+written for this repo. See ``scripts/g_theory_study.py`` for the CLI that
+calls it per run_id, and ``scripts/build_synthesis_tables.py`` for the
+aggregate that lands in ``reports/synthesis_g_theory_*.csv``.
 """
 from __future__ import annotations
 

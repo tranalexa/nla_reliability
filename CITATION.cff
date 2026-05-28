@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+title: "nla_reliability: a reliability evaluation layer for Anthropic's Natural Language Autoencoders"
+message: >
+  If you use this software, please cite the original NLA paper as well.
+authors:
+  - family-names: Tran
+    given-names: Alexa
+license: MIT
+type: software
+repository-code: "https://github.com/alexatran/nla_reliability"
+references:
+  - type: article
+    title: "Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations"
+    authors:
+      - family-names: Fraser-Taliente
+        given-names: Cody
+      - family-names: Kantamneni
+        given-names: Sanjana
+      - family-names: Ong
+        given-names: Ben
+    journal: "Transformer Circuits"
+    year: 2026
+    url: "https://transformer-circuits.pub/2026/nla/index.html"
+    notes: >
+      Introduces the Natural Language Autoencoder (NLA) framework and the
+      pretrained AV / AR checkpoints (kitft/nla-gemma3-12b-L32-av,
+      kitft/nla-gemma3-12b-L32-ar) used by this repository.

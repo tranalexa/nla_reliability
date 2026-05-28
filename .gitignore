@@ -3,12 +3,29 @@ __pycache__/
 *.pyc
 .DS_Store
 
-# Modal pulls (keep data/README.md and data/.gitkeep)
-/data/*.parquet
-/data/*.csv
-/data/*.npy
+# Derived data — regenerate via Modal + pull_from_modal.py
+data/runs/**/*.parquet
+data/runs/**/*.csv
+data/runs/**/*.npy
 
-# Stray pulls at repo root (prefer data/)
+# Derived reports — regenerate via build_synthesis_tables.py
+reports/*.csv
+reports/*.tex
+
+# Derived figures — regenerate via generate_figure_bundle.py + the notebook
+figures/
+figures_bundle/*
+!figures_bundle/.gitkeep
+figures_bundle */
+
+# Notebook side effects (executed outputs land here)
+notebooks/.ipynb_checkpoints/
+notebooks/*.pdf
+
+# Bundles / archives
+*.zip
+
+# Legacy stray pulls at repo root (covered by data/ rules but listed explicitly)
 /descriptions.parquet
 /selfdescribe_400.csv
 /activations_layer32*.parquet

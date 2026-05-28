@@ -42,28 +42,14 @@ activation_idx.
 
 Prerequisites
 --------------
-1. Original activation vectors in data/:
-     modal volume get nla-cache \\
-       activations_layer32_prism_gemma-3-12b-pt.parquet \\
-       data/activations_layer32_prism_gemma-3-12b-pt.parquet
+1. Run the full Modal pipeline for the chosen run_id (Step 1 + 3 with --save-vectors).
+2. Pull the artifacts locally::
 
-2. Reconstructed vectors (requires re-running Step 3 with --save-vectors):
-     uv run modal run reconstruct_scores.py \\
-       --activations activations_layer32_prism_gemma-3-12b-pt.parquet \\
-       --descriptions descriptions_prism.parquet \\
-       --pairwise-out pairwise_consistency_prism.parquet \\
-       --fidelity-out fidelity_scores_prism.parquet \\
-       --save-vectors
-
-     modal volume get nla-cache recon_vectors_prism.parquet \\
-       data/recon_vectors_prism.parquet
+       uv run python scripts/pull_from_modal.py --run-id prism
 
 Run:
-  uv run python scripts/diagnose_reconstruction_fidelity.py
-  uv run python scripts/diagnose_reconstruction_fidelity.py \\
-    --activations data/activations_layer32_prism_gemma-3-12b-pt.parquet \\
-    --recon-vectors data/recon_vectors_prism.parquet \\
-    --n-mismatch 5 --seed 42
+  uv run python scripts/diagnose_reconstruction_fidelity.py --run-id prism
+  uv run python scripts/diagnose_reconstruction_fidelity.py --run-id biosbias --n-mismatch 10
 """
 from __future__ import annotations
 
@@ -77,10 +63,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-DATA = ROOT / "data"
+from nla.paths import (  # noqa: E402
+    local_activations_path,
+    local_recon_vectors_path,
+    validate_run_id,
+)
 
-DEFAULT_ACTIVATIONS = DATA / "activations_layer32_prism_gemma-3-12b-pt.parquet"
-DEFAULT_RECON_VECTORS = DATA / "recon_vectors_prism.parquet"
+DEFAULT_RUN_ID = "prism"
 DEFAULT_N_MISMATCH = 5
 DEFAULT_SEED = 42
 
@@ -139,33 +128,29 @@ def section(title: str) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--activations", type=Path, default=DEFAULT_ACTIVATIONS,
-                   help="Activation vectors parquet (Step 1 output)")
-    p.add_argument("--recon-vectors", type=Path, default=DEFAULT_RECON_VECTORS,
-                   help="Reconstructed vectors parquet (Step 3 --save-vectors output)")
+    p.add_argument("--run-id", default=DEFAULT_RUN_ID,
+                   help="Canonical run_id (prism | biosbias | mmlu_choice | mmlu_nochoice)")
+    p.add_argument("--activations", type=Path, default=None,
+                   help="Override activation parquet path (default: derived from --run-id)")
+    p.add_argument("--recon-vectors", type=Path, default=None,
+                   help="Override reconstructed-vectors parquet path (default: from --run-id)")
     p.add_argument("--n-mismatch", type=int, default=DEFAULT_N_MISMATCH,
                    help="Mismatched originals to sample per reconstruction (default 5)")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     args = p.parse_args()
+
+    validate_run_id(args.run_id)
+    args.activations = args.activations or local_activations_path(args.run_id)
+    args.recon_vectors = args.recon_vectors or local_recon_vectors_path(args.run_id)
 
     missing = [f for f in [args.activations, args.recon_vectors] if not f.exists()]
     if missing:
         print("ERROR: missing input files:")
         for f in missing:
             print(f"  {f}")
-        if args.recon_vectors in missing:
-            print()
-            print("Re-run Step 3 with --save-vectors to generate reconstructed vectors:")
-            print("  uv run modal run reconstruct_scores.py \\")
-            print("    --activations activations_layer32_prism_gemma-3-12b-pt.parquet \\")
-            print("    --descriptions descriptions_prism.parquet \\")
-            print("    --pairwise-out pairwise_consistency_prism.parquet \\")
-            print("    --fidelity-out fidelity_scores_prism.parquet \\")
-            print("    --save-vectors")
-            print()
-            print("Then pull the output:")
-            print("  modal volume get nla-cache recon_vectors_prism.parquet \\")
-            print("    data/recon_vectors_prism.parquet")
+        print()
+        print("Run the Modal pipeline for this run_id (Step 1 + Step 3 with --save-vectors), then:")
+        print(f"  uv run python scripts/pull_from_modal.py --run-id {args.run_id}")
         sys.exit(1)
 
     rng = np.random.default_rng(args.seed)

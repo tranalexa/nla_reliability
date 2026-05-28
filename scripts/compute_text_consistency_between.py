@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""Between-item text consistency (MPNet) baseline.
+"""Between-item text consistency (MPNet) baseline per activation.
 
-For each activation we already compute the mean **within-item** pairwise MPNet cosine
-across its 12 descriptions (`scripts/compute_text_consistency.py`).
+For each activation we already compute the mean within-item pairwise MPNet
+cosine across its 12 AV descriptions (``scripts/compute_text_consistency.py``).
 
-This script computes the **between-item** baseline: for each activation i, the mean
-cosine between any of its 12 description embeddings and any description embedding from
-a *different* activation j != i in the same benchmark.
+This script computes the **between-item** baseline: for each activation i, the
+mean cosine between any of its 12 description embeddings and any description
+embedding from a different activation j != i in the same run.
 
 Interpretation:
-- within − between ≈ how much MORE the 12 paraphrases of one item agree than
-  random descriptions from the same benchmark. If within ≈ between, the high
-  within-item number is just "this benchmark talks about similar stuff" rather than
-  "AV is paraphrase-stable for each item."
+  within - between is how much MORE the 12 paraphrases of one item agree than
+  random descriptions from the same run. If within ~= between, the high
+  within-item number is just "this benchmark talks about similar stuff" rather
+  than "AV is paraphrase-stable for each item."
 
-Output: parquet with one row per activation, plus a stdout summary that pairs this
-with the existing within-item numbers for the same descriptions file.
+Output: ``data/runs/<run_id>/text_between_item_mpnet_<dataset>.parquet`` with
+per-activation mean/std/quantiles, plus a row appended to
+``reports/synthesis_text_between_item.csv`` summarising every processed run.
 
-Examples:
-  uv run python scripts/compute_text_consistency_between.py --dataset prism
-  uv run python scripts/compute_text_consistency_between.py --dataset biosbias
-  uv run python scripts/compute_text_consistency_between.py --dataset mmlu
-  uv run python scripts/compute_text_consistency_between.py \\
-      --dataset mmlu \\
-      --descriptions data/data/descriptions_mmlu.parquet \\
-      --output       data/text_between_item_mpnet_mmlu_choices.parquet \\
-      --within       data/text_consistency_mpnet_mmlu_choices.parquet
+Usage:
+  uv run python scripts/compute_text_consistency_between.py --run-id prism
   uv run python scripts/compute_text_consistency_between.py --all-runs
 """
 from __future__ import annotations
@@ -34,7 +28,6 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -42,47 +35,15 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from nla.datasets import SUPPORTED_DATASETS  # noqa: E402
 from nla.paths import (  # noqa: E402
+    RUN_IDS,
     local_descriptions_path,
+    local_text_between_item_mpnet_path,
     local_text_consistency_mpnet_path,
 )
 
-DATA = ROOT / "data"
-INNER = DATA / "data"
 REPORTS = ROOT / "reports"
-
 DEFAULT_MODEL = "sentence-transformers/all-mpnet-base-v2"
-
-# Bundled "runs": each (run_id, descriptions, within file, output) so --all-runs covers
-# every benchmark variant currently in the repo (PRISM, BiasBios, MMLU with choices,
-# MMLU question-only).
-ALL_RUNS: list[dict] = [
-    {
-        "run_id": "prism",
-        "descriptions": INNER / "descriptions_prism.parquet",
-        "within": DATA / "text_consistency_mpnet_prism.parquet",
-        "output": DATA / "text_between_item_mpnet_prism.parquet",
-    },
-    {
-        "run_id": "biosbias",
-        "descriptions": INNER / "descriptions_biosbias.parquet",
-        "within": DATA / "text_consistency_mpnet_biosbias.parquet",
-        "output": DATA / "text_between_item_mpnet_biosbias.parquet",
-    },
-    {
-        "run_id": "mmlu_with_choices",
-        "descriptions": INNER / "descriptions_mmlu.parquet",
-        "within": DATA / "text_consistency_mpnet_mmlu_choices.parquet",
-        "output": DATA / "text_between_item_mpnet_mmlu_choices.parquet",
-    },
-    {
-        "run_id": "mmlu_question_only",
-        "descriptions": DATA / "descriptions_mmlu.parquet",
-        "within": DATA / "text_consistency_mpnet_mmlu.parquet",
-        "output": DATA / "text_between_item_mpnet_mmlu.parquet",
-    },
-]
 
 
 def resolve_device(device: str) -> str:
@@ -137,12 +98,13 @@ def _encode_descriptions(
 
 
 def _between_item_stats(emb: np.ndarray, N: int, K: int) -> dict[str, np.ndarray]:
-    """Per-activation mean/std/quantiles of cosines vs ALL descriptions of OTHER activations.
+    """Per-activation mean/std/quantiles vs ALL descriptions of OTHER activations.
 
-    emb shape (N*K, D), unit-norm rows.
+    ``emb`` has shape (N*K, D) with unit-norm rows. Memory for the full Gram
+    matrix is fine at N=400, K=12, D=768 (~92 MB).
     """
-    G = emb  # (N*K, D)
-    sims = G @ G.T  # (N*K, N*K) — fine for N=400, K=12, D=768 (~92 MB).
+    G = emb
+    sims = G @ G.T
 
     mean_between = np.empty(N, dtype=np.float32)
     std_between = np.empty(N, dtype=np.float32)
@@ -155,7 +117,7 @@ def _between_item_stats(emb: np.ndarray, N: int, K: int) -> dict[str, np.ndarray
         block_rows = np.arange(i * K, (i + 1) * K)
         col_mask = full_mask.copy()
         col_mask[block_rows] = False  # exclude same-activation columns
-        rows = sims[block_rows][:, col_mask]  # (K, (N-1)*K)
+        rows = sims[block_rows][:, col_mask]
         flat = rows.ravel()
         mean_between[i] = flat.mean()
         std_between[i] = flat.std(ddof=1)
@@ -180,20 +142,19 @@ def _summary(arr: np.ndarray) -> dict[str, float]:
 
 
 def _within_summary(within_path: Path) -> dict[str, float] | None:
-    if within_path is None or not within_path.exists():
+    if not within_path.exists():
         return None
     df = pd.read_parquet(within_path)
-    col = "mean_pairwise_text_cosine"
-    if col not in df.columns:
+    if "mean_pairwise_text_cosine" not in df.columns:
         return None
-    return _summary(df[col].to_numpy(dtype=np.float32))
+    return _summary(df["mean_pairwise_text_cosine"].to_numpy(dtype=np.float32))
 
 
 def compute_one(
     *,
     run_id: str,
     descriptions: Path,
-    within: Path | None,
+    within: Path,
     output: Path,
     model_id: str,
     batch_size: int,
@@ -216,16 +177,16 @@ def compute_one(
     print(f"    median {summary['median']:.4f}")
     print(f"    p95    {summary['p95']:.4f}")
 
-    within_summary = _within_summary(within) if within else None
+    within_summary = _within_summary(within)
     if within_summary is not None:
         gap = within_summary["mean"] - summary["mean"]
         print("\n  within (existing)   vs   between (new):")
         print(f"    mean within:  {within_summary['mean']:.4f}")
         print(f"    mean between: {summary['mean']:.4f}")
-        print(f"    gap (within − between): {gap:+.4f}")
-    print(f"\n  wrote {len(out)} rows -> {output.relative_to(ROOT) if output.is_relative_to(ROOT) else output}")
+        print(f"    gap (within - between): {gap:+.4f}")
+    print(f"\n  wrote {len(out)} rows -> {output}")
 
-    row = {
+    return {
         "run_id": run_id,
         "n_activations": int(N),
         "k_samples": int(K),
@@ -240,79 +201,59 @@ def compute_one(
             float(within_summary["mean"] - summary["mean"]) if within_summary else np.nan
         ),
     }
-    return row
 
 
-def _runs_from_args(args: argparse.Namespace) -> list[dict]:
-    if args.all_runs:
-        return ALL_RUNS
-
-    if args.dataset is None and args.descriptions is None:
-        raise SystemExit("must pass --dataset, --descriptions/--output, or --all-runs")
-
-    if args.descriptions is not None and args.output is not None:
-        return [{
-            "run_id": args.dataset or args.descriptions.stem,
-            "descriptions": args.descriptions,
-            "within": args.within,
-            "output": args.output,
-        }]
-
-    ds = args.dataset
-    if ds not in SUPPORTED_DATASETS:
-        raise SystemExit(f"--dataset must be one of {SUPPORTED_DATASETS}, got {ds}")
-    return [{
-        "run_id": ds,
-        "descriptions": local_descriptions_path(ds),
-        "within": local_text_consistency_mpnet_path(ds),
-        "output": DATA / f"text_between_item_mpnet_{ds}.parquet",
-    }]
-
-
-def _write_summary_csv(rows: Iterable[dict], path: Path) -> None:
-    df = pd.DataFrame(list(rows))
+def _write_summary_csv(rows: list[dict], path: Path) -> None:
+    df = pd.DataFrame(rows)
     if df.empty:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
-    print(f"\nwrote summary -> {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
+    print(f"\nwrote summary -> {path}")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument("--dataset", default=None, choices=[*SUPPORTED_DATASETS, None])
-    p.add_argument("--all-runs", action="store_true",
-                   help="run on PRISM, BiasBios, MMLU+choices, MMLU question-only")
-    p.add_argument("--descriptions", type=Path, default=None,
-                   help="explicit input descriptions parquet (overrides --dataset)")
-    p.add_argument("--output", type=Path, default=None,
-                   help="explicit output parquet (overrides --dataset)")
-    p.add_argument("--within", type=Path, default=None,
-                   help="existing within-item text consistency parquet for the same descriptions; "
-                        "used for an on-screen within vs between comparison")
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--run-id", default=None, choices=list(RUN_IDS))
+    p.add_argument("--all-runs", action="store_true", help="run on every canonical run sequentially")
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
-    p.add_argument("--summary-csv", type=Path,
-                   default=REPORTS / "synthesis_text_between_item.csv",
-                   help="aggregated CSV of within/between per run")
+    p.add_argument(
+        "--summary-csv",
+        type=Path,
+        default=REPORTS / "synthesis_text_between_item.csv",
+        help="aggregated CSV of within/between per run",
+    )
+    p.add_argument(
+        "--skip-missing",
+        action="store_true",
+        help="with --all-runs, skip runs whose descriptions parquet is absent",
+    )
     args = p.parse_args()
 
+    if not args.all_runs and args.run_id is None:
+        p.error("either --run-id or --all-runs is required")
+
     device = resolve_device(args.device)
-    runs = _runs_from_args(args)
+    run_ids = list(RUN_IDS) if args.all_runs else [args.run_id]
+    skip_missing = args.skip_missing or args.all_runs
 
     rows: list[dict] = []
-    for run in runs:
-        if not run["descriptions"].exists():
-            print(f"\n[skip] {run['run_id']}: missing {run['descriptions']}")
-            continue
+    for r in run_ids:
+        desc = local_descriptions_path(r)
+        if not desc.exists():
+            msg = f"missing {desc}"
+            if skip_missing:
+                print(f"\n[skip] {r}: {msg}")
+                continue
+            print(f"ERROR [{r}]: {msg}", file=sys.stderr)
+            sys.exit(1)
         rows.append(compute_one(
-            run_id=run["run_id"],
-            descriptions=run["descriptions"],
-            within=run.get("within"),
-            output=run["output"],
+            run_id=r,
+            descriptions=desc,
+            within=local_text_consistency_mpnet_path(r),
+            output=local_text_between_item_mpnet_path(r),
             model_id=args.model,
             batch_size=args.batch_size,
             device=device,
@@ -326,11 +267,16 @@ def main() -> None:
         print(header)
         print("-" * len(header))
         for r in rows:
-            within = f"{r['within_mean']:.4f}" if pd.notna(r['within_mean']) else "—"
-            print(f"{r['run_id']:22s} {within:>8s} {r['between_mean']:>9.4f} "
-                  f"{r['gap_within_minus_between']:>+9.4f}"
-                  if pd.notna(r['gap_within_minus_between']) else
-                  f"{r['run_id']:22s} {within:>8s} {r['between_mean']:>9.4f} {'—':>9s}")
+            within = f"{r['within_mean']:.4f}" if pd.notna(r['within_mean']) else "-"
+            if pd.notna(r['gap_within_minus_between']):
+                print(
+                    f"{r['run_id']:22s} {within:>8s} {r['between_mean']:>9.4f} "
+                    f"{r['gap_within_minus_between']:>+9.4f}"
+                )
+            else:
+                print(
+                    f"{r['run_id']:22s} {within:>8s} {r['between_mean']:>9.4f} {'-':>9s}"
+                )
         _write_summary_csv(rows, args.summary_csv)
 
 

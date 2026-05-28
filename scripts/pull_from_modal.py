@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Download pipeline artifacts from Modal volume nla-cache into ./data/.
+"""Download pipeline artifacts for one run_id from the Modal volume into data/runs/<run_id>/.
 
 Usage:
-  # Single dataset
-  uv run python scripts/pull_from_modal.py --dataset prism
-  uv run python scripts/pull_from_modal.py --dataset biosbias
-
-  # Both datasets
-  uv run python scripts/pull_from_modal.py --all-datasets
-
-  # Subset of artifact types
-  uv run python scripts/pull_from_modal.py --dataset prism --only csv,activations,descriptions
+  uv run python scripts/pull_from_modal.py --run-id prism
+  uv run python scripts/pull_from_modal.py --run-id biosbias
+  uv run python scripts/pull_from_modal.py --run-id mmlu_choice
+  uv run python scripts/pull_from_modal.py --run-id mmlu_nochoice
+  uv run python scripts/pull_from_modal.py --all-runs
+  uv run python scripts/pull_from_modal.py --run-id prism --only csv,activations,descriptions
 
 Artifact types (--only):
   csv           sampled items CSV
@@ -30,26 +27,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from nla.datasets import SUPPORTED_DATASETS  # noqa: E402
 from nla.paths import (  # noqa: E402
-    DATA_DIR,
     MODAL_CACHE,
     MODAL_VOLUME,
-    activations_filename,
-    csv_filename,
-    descriptions_filename,
-    fidelity_filename,
-    pairwise_filename,
-    recon_vectors_filename,
+    RUN_IDS,
+    local_activations_path,
+    local_csv_path,
+    local_descriptions_path,
+    local_fidelity_path,
+    local_pairwise_path,
+    local_recon_vectors_path,
+    run_dir,
+    volume_activations_path,
+    volume_csv_path,
+    volume_descriptions_path,
+    volume_fidelity_path,
+    volume_pairwise_path,
+    volume_recon_vectors_path,
 )
 
 DEFAULT_N_ITEMS = 400
+ARTIFACT_TYPES = ("csv", "activations", "descriptions", "pairwise", "fidelity", "vectors")
 
 
 def pull(remote: str, dest: Path) -> None:
+    """Run ``modal volume get`` from ``remote`` to local ``dest``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # modal volume get uses volume-relative paths; MODAL_CACHE is the container
-    # mount point (/cache), not a subdirectory inside the volume.
+    # modal volume get uses volume-relative paths (the volume root is the
+    # /cache mount inside containers).
     remote_path = remote.removeprefix(MODAL_CACHE) or "/"
     print(f"  pull  {remote}")
     print(f"     -> {dest}")
@@ -58,51 +63,33 @@ def pull(remote: str, dest: Path) -> None:
         check=False,
     )
     if result.returncode != 0:
-        print(f"  WARNING: pull failed (exit {result.returncode}) — file may not exist yet")
+        print(f"  WARNING: pull failed (exit {result.returncode}) - file may not exist yet")
 
 
-def pull_dataset(dataset: str, n_items: int, only: set[str] | None) -> None:
+def pull_run(run_id: str, n_items: int, only: set[str] | None) -> None:
     def want(name: str) -> bool:
         return only is None or name in only
 
     pulls: list[tuple[str, Path]] = []
 
     if want("csv"):
-        pulls.append((
-            f"{MODAL_CACHE}/{csv_filename(dataset, n_items)}",
-            DATA_DIR / csv_filename(dataset, n_items),
-        ))
+        pulls.append((volume_csv_path(run_id, n_items), local_csv_path(run_id, n_items)))
     if want("activations"):
-        pulls.append((
-            f"{MODAL_CACHE}/{activations_filename(dataset)}",
-            DATA_DIR / activations_filename(dataset),
-        ))
+        pulls.append((volume_activations_path(run_id), local_activations_path(run_id)))
     if want("descriptions"):
-        pulls.append((
-            f"{MODAL_CACHE}/{descriptions_filename(dataset)}",
-            DATA_DIR / descriptions_filename(dataset),
-        ))
+        pulls.append((volume_descriptions_path(run_id), local_descriptions_path(run_id)))
     if want("pairwise"):
-        pulls.append((
-            f"{MODAL_CACHE}/{pairwise_filename(dataset)}",
-            DATA_DIR / pairwise_filename(dataset),
-        ))
+        pulls.append((volume_pairwise_path(run_id), local_pairwise_path(run_id)))
     if want("fidelity"):
-        pulls.append((
-            f"{MODAL_CACHE}/{fidelity_filename(dataset)}",
-            DATA_DIR / fidelity_filename(dataset),
-        ))
+        pulls.append((volume_fidelity_path(run_id), local_fidelity_path(run_id)))
     if want("vectors"):
-        pulls.append((
-            f"{MODAL_CACHE}/{recon_vectors_filename(dataset)}",
-            DATA_DIR / recon_vectors_filename(dataset),
-        ))
+        pulls.append((volume_recon_vectors_path(run_id), local_recon_vectors_path(run_id)))
 
     if not pulls:
-        print(f"  nothing selected to pull for {dataset}")
+        print(f"  nothing selected to pull for {run_id}")
         return
 
-    print(f"\n=== Pulling {dataset} ({len(pulls)} files) ===")
+    print(f"\n=== Pulling {run_id} ({len(pulls)} files) into {run_dir(run_id).relative_to(ROOT)}/ ===")
     for remote, dest in pulls:
         pull(remote, dest)
 
@@ -113,15 +100,15 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "--dataset",
-        default="prism",
-        choices=SUPPORTED_DATASETS,
-        help="dataset to pull (default: prism)",
+        "--run-id",
+        default=None,
+        choices=list(RUN_IDS),
+        help="which run to pull (one of: prism, biosbias, mmlu_choice, mmlu_nochoice)",
     )
     p.add_argument(
-        "--all-datasets",
+        "--all-runs",
         action="store_true",
-        help="pull artifacts for all datasets (prism and biosbias)",
+        help="pull artifacts for every canonical run_id in sequence",
     )
     p.add_argument(
         "--n-items",
@@ -132,18 +119,25 @@ def main() -> None:
     p.add_argument(
         "--only",
         default="",
-        help="comma-separated subset: csv,activations,descriptions,pairwise,fidelity,vectors",
+        help=f"comma-separated subset of artifact types: {','.join(ARTIFACT_TYPES)}",
     )
     args = p.parse_args()
 
+    if not args.all_runs and args.run_id is None:
+        p.error("either --run-id or --all-runs is required")
+
     only = {x.strip() for x in args.only.split(",") if x.strip()} or None
-    datasets = SUPPORTED_DATASETS if args.all_datasets else [args.dataset]
+    if only is not None:
+        bad = only - set(ARTIFACT_TYPES)
+        if bad:
+            p.error(f"unknown --only types: {sorted(bad)} (allowed: {ARTIFACT_TYPES})")
 
-    print(f"volume={MODAL_VOLUME}  dest={DATA_DIR.resolve()}")
-    for ds in datasets:
-        pull_dataset(ds, args.n_items, only)
+    run_ids = list(RUN_IDS) if args.all_runs else [args.run_id]
+    print(f"volume={MODAL_VOLUME}  dest={(ROOT / 'data' / 'runs').resolve()}")
+    for r in run_ids:
+        pull_run(r, args.n_items, only)
 
-    print(f"\ndone — pulled {len(datasets)} dataset(s) into {DATA_DIR.resolve()}")
+    print(f"\ndone - pulled {len(run_ids)} run(s) into data/runs/")
 
 
 if __name__ == "__main__":

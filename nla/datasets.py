@@ -1,17 +1,30 @@
 """Dataset loading for the NLA reliability evaluation pipeline.
 
-Provides load_dataset_items() with a common schema:
+Provides ``load_dataset_items()`` with a common schema:
 
   item_idx    (int)  — zero-based index; aligned with activation_idx in all outputs
   dataset     (str)  — "prism" | "biosbias" | "mmlu"
   prompt_text (str)  — text passed to Gemma for activation extraction
 
-Additional metadata columns are dataset-specific and are not required by the core
-pipeline (Steps 1–3). They are preserved in the CSV for downstream diagnostic grouping.
+Additional metadata columns are dataset-specific and are not required by the
+core pipeline (Steps 1-3). They are preserved in the per-run CSV for
+downstream diagnostic grouping.
 
-PRISM metadata:    gender (model-predicted), gt_gender (survey ground truth)
-BiasBios metadata: profession, gender
-MMLU metadata:     subject, question, choices (JSON), answer, split
+  PRISM metadata:    gender (model-predicted), gt_gender (survey ground truth)
+  BiasBios metadata: profession, gender (used for stratified 50/50 sampling)
+  MMLU metadata:     subject, question, choices (JSON), answer, split
+
+MMLU supports two prompt modes (``mmlu_prompt_mode`` argument), one per run_id:
+
+  "with_choices"  → prompt_text = "Question: ...\\n\\nA. ...\\nB. ...\\nC. ...\\nD. ...\\n\\nAnswer:"
+                    (used by run_id ``mmlu_choice``)
+  "question_only" → prompt_text = question stem only
+                    (used by run_id ``mmlu_nochoice``)
+
+Seeds: PRISM (HF dataset shuffle), BiasBios (stratified split), and MMLU
+(subject subsample) all use ``seed=42`` by default. The same seed produces the
+same 400-item ordering across machines as long as the upstream HF dataset
+revisions are identical.
 """
 from __future__ import annotations
 
@@ -179,10 +192,41 @@ MMLU_HF_SLUG = "cais/mmlu"
 MMLU_SUBJECTS = ["abstract_algebra", "moral_scenarios", "virology", "astronomy"]
 _MMLU_SPLIT_PREFERENCE = ("test", "validation")
 
+#: Supported MMLU prompt-text variants.
+MMLU_PROMPT_MODES = ("question_only", "with_choices")
+DEFAULT_MMLU_PROMPT_MODE = "question_only"
 
-def _format_mmlu_prompt(question: str) -> str:
-    """Question stem only (no A–D choices). Choices stay in CSV metadata."""
-    return question.strip()
+_MMLU_CHOICE_LETTERS = ("A", "B", "C", "D")
+
+
+def _format_mmlu_prompt(
+    question: str,
+    choices: list[str] | None = None,
+    *,
+    mode: str = DEFAULT_MMLU_PROMPT_MODE,
+) -> str:
+    """Build the MMLU prompt_text in either question-only or with-choices format.
+
+    "question_only" returns the bare stem (default; matches the original setup).
+    "with_choices" appends labelled A-D options and a trailing "Answer:" cue so
+    Gemma's final-token activation sees the full multiple-choice context.
+    """
+    stem = question.strip()
+    if mode == "question_only":
+        return stem
+    if mode == "with_choices":
+        if choices is None or len(choices) != 4:
+            raise ValueError(
+                "with_choices mode requires a list of exactly four A-D options"
+            )
+        option_lines = "\n".join(
+            f"{letter}. {choice.strip()}"
+            for letter, choice in zip(_MMLU_CHOICE_LETTERS, choices)
+        )
+        return f"Question: {stem}\n{option_lines}\nAnswer:"
+    raise ValueError(
+        f"unknown MMLU prompt mode {mode!r}; expected one of {MMLU_PROMPT_MODES}"
+    )
 
 
 def _mmlu_valid_indices(ds) -> list[int]:
@@ -198,11 +242,22 @@ def _mmlu_valid_indices(ds) -> list[int]:
     ]
 
 
-def _load_mmlu(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.DataFrame:
+def _load_mmlu(
+    n_items: int,
+    seed: int,
+    *,
+    hf_token: str | None = None,
+    mmlu_prompt_mode: str = DEFAULT_MMLU_PROMPT_MODE,
+) -> pd.DataFrame:
     import json
 
     from datasets import load_dataset as hf_load
 
+    if mmlu_prompt_mode not in MMLU_PROMPT_MODES:
+        raise ValueError(
+            f"unknown mmlu_prompt_mode {mmlu_prompt_mode!r}; "
+            f"expected one of {MMLU_PROMPT_MODES}"
+        )
     n_subjects = len(MMLU_SUBJECTS)
     per_subject = (n_items + n_subjects - 1) // n_subjects  # ceiling division
 
@@ -263,7 +318,11 @@ def _load_mmlu(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.Da
                     "choices": json.dumps(record["choices"]),
                     "answer": int(record["answer"]),
                     "split": used_split,
-                    "prompt_text": _format_mmlu_prompt(record["question"]),
+                    "prompt_text": _format_mmlu_prompt(
+                        record["question"],
+                        list(record["choices"]),
+                        mode=mmlu_prompt_mode,
+                    ),
                 }
             )
 
@@ -283,11 +342,18 @@ def load_dataset_items(
     seed: int = DEFAULT_SEED,
     *,
     hf_token: str | None = None,
+    mmlu_prompt_mode: str = DEFAULT_MMLU_PROMPT_MODE,
 ) -> pd.DataFrame:
     """Load and sample n_items from the specified dataset.
 
-    Returns DataFrame with columns: item_idx, dataset, prompt_text,
-    plus dataset-specific metadata columns.
+    Returns DataFrame with columns: item_idx, dataset, prompt_text, plus
+    dataset-specific metadata columns.
+
+    For ``dataset="mmlu"``, ``mmlu_prompt_mode`` selects how prompt_text is
+    formatted:
+      - "question_only" (default): question stem alone.
+      - "with_choices": "Question: …\\nA. …\\nB. …\\nC. …\\nD. …\\nAnswer:".
+    The choice is irrelevant for the other datasets.
     """
     if dataset not in SUPPORTED_DATASETS:
         raise ValueError(
@@ -296,5 +362,7 @@ def load_dataset_items(
     if dataset == "prism":
         return _load_prism(n_items, seed, hf_token=hf_token)
     if dataset == "mmlu":
-        return _load_mmlu(n_items, seed, hf_token=hf_token)
+        return _load_mmlu(
+            n_items, seed, hf_token=hf_token, mmlu_prompt_mode=mmlu_prompt_mode
+        )
     return _load_biosbias(n_items, seed, hf_token=hf_token)

@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Train a linear probe for MMLU on original vs reconstructed activations.
+"""Linear probe for MMLU: original vs mean-reconstructed activations.
 
-This script evaluates subject classification accuracy using:
-  1) original Step-1 activations
-  2) mean of Step-3 reconstructed vectors per activation_idx
+Trains a multinomial logistic-regression probe to predict the MMLU ``subject``
+label (4 classes: abstract_algebra, moral_scenarios, virology, astronomy) from
+either:
+  1. The original Step-1 activation vector, or
+  2. The mean of the 12 Step-3 reconstructions for the same activation.
 
-Both probes use the same train/test split for fair comparison.
+Both probes share the same train/test split (seed 42, 80/20 stratified) so
+they are directly comparable. A majority-class baseline is reported alongside.
 
 Usage:
-  uv run python scripts/train_linear_probe_mmlu.py
-  uv run python scripts/train_linear_probe_mmlu.py --test-size 0.2 --seed 42
-  uv run python scripts/train_linear_probe_mmlu.py --output reports/linear_probe_mmlu_compare.csv
+  uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_choice
+  uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_nochoice --output reports/linear_probe_mmlu_nochoice.csv
 """
 from __future__ import annotations
 
@@ -27,7 +29,11 @@ from sklearn.model_selection import train_test_split
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from nla.paths import local_activations_path, local_csv_path, local_recon_vectors_path  # noqa: E402
+from nla.paths import (  # noqa: E402
+    local_activations_path,
+    local_csv_path,
+    local_recon_vectors_path,
+)
 
 
 def _l2_normalize_rows(X: np.ndarray) -> np.ndarray:
@@ -50,7 +56,6 @@ def _load_recon_means(path: Path, n_items: int) -> np.ndarray:
 
     sums = None
     counts = np.zeros(n_items, dtype=np.int32)
-
     for idx, vec in zip(df["activation_idx"].to_numpy(), df["recon_vector"].to_list()):
         i = int(idx)
         if i < 0 or i >= n_items:
@@ -66,15 +71,13 @@ def _load_recon_means(path: Path, n_items: int) -> np.ndarray:
     if np.any(counts == 0):
         missing = np.where(counts == 0)[0].tolist()
         raise ValueError(f"missing recon rows for activation_idx values: {missing[:10]}")
-
     return sums / counts[:, None]
 
 
 def _majority_acc(y_train: np.ndarray, y_test: np.ndarray) -> float:
     labels, counts = np.unique(y_train, return_counts=True)
     majority = labels[int(np.argmax(counts))]
-    pred = np.full_like(y_test, majority)
-    return float(accuracy_score(y_test, pred))
+    return float(accuracy_score(y_test, np.full_like(y_test, majority)))
 
 
 def _fit_and_score(
@@ -87,34 +90,40 @@ def _fit_and_score(
 ) -> float:
     clf = LogisticRegression(max_iter=max_iter, C=c)
     clf.fit(X_train, y_train)
-    y_pred = clf.predict(X_test)
-    return float(accuracy_score(y_test, y_pred))
+    return float(accuracy_score(y_test, clf.predict(X_test)))
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--csv", type=Path, default=local_csv_path("mmlu", 400))
-    p.add_argument("--activations", type=Path, default=local_activations_path("mmlu"))
-    p.add_argument("--recon-vectors", type=Path, default=local_recon_vectors_path("mmlu"))
+    p.add_argument(
+        "--run-id",
+        default="mmlu_choice",
+        choices=["mmlu_choice", "mmlu_nochoice"],
+        help="which MMLU run to probe",
+    )
     p.add_argument("--target", default="subject", help="CSV column to predict (default: subject)")
     p.add_argument("--test-size", type=float, default=0.2)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=42, help="train/test split seed (default: 42)")
     p.add_argument("--max-iter", type=int, default=3000)
     p.add_argument("--c", type=float, default=1.0)
     p.add_argument("--no-l2-normalize", action="store_true")
     p.add_argument("--output", type=Path, default=None, help="optional CSV output path")
     args = p.parse_args()
 
-    csv_df = pd.read_csv(args.csv)
+    csv_path = local_csv_path(args.run_id, 400)
+    act_path = local_activations_path(args.run_id)
+    recon_path = local_recon_vectors_path(args.run_id)
+
+    csv_df = pd.read_csv(csv_path)
     if args.target not in csv_df.columns:
-        raise ValueError(f"{args.csv} missing target column: {args.target}")
+        raise ValueError(f"{csv_path} missing target column: {args.target}")
     y = csv_df[args.target].astype(str).to_numpy()
     n_items = len(csv_df)
 
-    X_orig = _load_originals(args.activations)
+    X_orig = _load_originals(act_path)
     if X_orig.shape[0] != n_items:
-        raise ValueError(f"{args.activations} rows={X_orig.shape[0]} != csv rows={n_items}")
-    X_recon = _load_recon_means(args.recon_vectors, n_items=n_items)
+        raise ValueError(f"{act_path} rows={X_orig.shape[0]} != csv rows={n_items}")
+    X_recon = _load_recon_means(recon_path, n_items=n_items)
 
     if not args.no_l2_normalize:
         X_orig = _l2_normalize_rows(X_orig)
@@ -128,25 +137,18 @@ def main() -> None:
 
     majority = _majority_acc(y_train, y_test)
     orig_acc = _fit_and_score(
-        X_orig[train_idx],
-        X_orig[test_idx],
-        y_train,
-        y_test,
-        max_iter=args.max_iter,
-        c=args.c,
+        X_orig[train_idx], X_orig[test_idx], y_train, y_test,
+        max_iter=args.max_iter, c=args.c,
     )
     recon_acc = _fit_and_score(
-        X_recon[train_idx],
-        X_recon[test_idx],
-        y_train,
-        y_test,
-        max_iter=args.max_iter,
-        c=args.c,
+        X_recon[train_idx], X_recon[test_idx], y_train, y_test,
+        max_iter=args.max_iter, c=args.c,
     )
 
     out_df = pd.DataFrame(
         [
             {
+                "run_id": args.run_id,
                 "dataset": "mmlu",
                 "target": args.target,
                 "vector_source": "original",
@@ -158,6 +160,7 @@ def main() -> None:
                 "probe_acc": orig_acc,
             },
             {
+                "run_id": args.run_id,
                 "dataset": "mmlu",
                 "target": args.target,
                 "vector_source": "recon_mean",
@@ -171,7 +174,7 @@ def main() -> None:
         ]
     )
 
-    print("\nMMLU linear probe (same split for both vector sources)")
+    print(f"\nMMLU linear probe ({args.run_id}, seed={args.seed}, same split for both sources)")
     print(out_df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
     print(f"\nDelta (recon_mean - original): {recon_acc - orig_acc:+.4f}")
 

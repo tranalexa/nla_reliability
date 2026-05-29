@@ -5,7 +5,7 @@ item CSV (pull with ``scripts/pull_from_modal.py --run-id <run_id>``).
 
 Usage:
   uv run python scripts/preview_descriptions.py --run-id prism
-  uv run python scripts/preview_descriptions.py --run-id biosbias -n 10
+  uv run python scripts/preview_descriptions.py --run-id biosbias --num-samples 10
   uv run python scripts/preview_descriptions.py --run-id mmlu_choice
 """
 
@@ -100,10 +100,20 @@ def main() -> None:
         help="path to items CSV (default: inferred from --run-id)",
     )
     p.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
-    p.add_argument("-n", type=int, default=10, help="description rows to sample (default: 10)")
+    # Use --num-samples (not -n): argparse abbreviates -n to --n-items otherwise.
+    p.add_argument(
+        "--num-samples",
+        type=int,
+        default=10,
+        help="description rows to sample (default: 10)",
+    )
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--n-items", type=int, default=DEFAULT_N_ITEMS,
-                   help="items count used in Step 1 (for CSV filename, default: 400)")
+    p.add_argument(
+        "--n-items",
+        type=int,
+        default=DEFAULT_N_ITEMS,
+        help="items count used in Step 1 (for CSV filename, default: 400)",
+    )
     args = p.parse_args()
 
     descriptions_path = args.descriptions or local_descriptions_path(args.run_id)
@@ -119,7 +129,7 @@ def main() -> None:
         sys.exit(1)
 
     merged = load_merged(descriptions_path, prompts_path)
-    n = min(args.n, len(merged))
+    n = min(args.num_samples, len(merged))
     sample = merged.sample(n=n, random_state=args.seed).sort_values(
         ["activation_idx", "sample_idx"]
     )

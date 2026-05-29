@@ -233,7 +233,7 @@ uv run jupyter nbconvert --to notebook --execute \
 If you want to inspect AV samples interactively:
 
 ```bash
-uv run python scripts/preview_descriptions.py --run-id prism --n 3
+uv run python scripts/preview_descriptions.py --run-id prism --num-samples 3
 ```
 
 ---
@@ -255,13 +255,16 @@ pipeline of) scripts in this repo:
 | D-study (G_rel by n′)                   | `scripts/g_theory_study.py` → `build_synthesis_tables.py`            | `reports/synthesis_g_theory_d_study.csv`         |
 | Fig. centered fidelity (matched/mismatched/gap) | `scripts/generate_figure_bundle.py`            | `figures_bundle/01_centered_fidelity.png`                    |
 | Fig. centered consistency               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/02_centered_consistency.png`                 |
-| Fig. raw vs centered                    | `scripts/generate_figure_bundle.py`                    | `figures_bundle/03_raw_vs_centered.png`                      |
-| Fig. cosine inflation                   | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04_cosine_inflation.png`                     |
-| Fig. per-item mean scatter              | `scripts/generate_figure_bundle.py`                    | `figures_bundle/05_per_item_means.png`                       |
-| Fig. text consistency (MPNet)           | `scripts/generate_figure_bundle.py`                    | `figures_bundle/06_text_consistency.png`                     |
-| Fig. G-study variance components        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07a_g_theory_variance.png`, `07b_…`         |
-| Fig. D-study G_rel curves               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/08_d_study_curves.png`                       |
-| Fig. linear probe accuracies            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/09_linear_probes.png`                        |
+| Fig. centered gaps (fidelity + consistency) | `scripts/generate_figure_bundle.py`              | `figures_bundle/03_centered_gaps.png`                        |
+| Fig. text consistency (MPNet)           | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04_text_consistency_mpnet.png`               |
+| Fig. text within vs between (MPNet)     | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04b_text_within_vs_between_mpnet.png`        |
+| Fig. linear probe accuracies            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/05_linear_probes.png`                        |
+| Fig. G-theory overview                  | `scripts/generate_figure_bundle.py`                    | `figures_bundle/06_gtheory_overview.png`                     |
+| Fig. G-study variance components        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07a_fidelity_variance_components.png`, `07b_consistency_variance_components.png` |
+| Fig. D-study G_rel curves               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07c_fidelity_dstudy.png`, `07d_consistency_dstudy.png`, `08_dstudy_side_by_side.png` |
+| Fig. G_rel(n′=1) vs G_rel(n′=12)        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/09_grel_n1_vs_n12.png`                       |
+| Fig. raw score distributions            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/10_raw_score_distributions.png`              |
+| Fig. per-item fidelity vs consistency   | `scripts/generate_figure_bundle.py`                    | `figures_bundle/11_per_item_fid_vs_consistency.png`          |
 | MMLU prompt mode side-by-side           | `scripts/generate_figure_bundle.py` + notebook §6      | `figures_bundle/1?_mmlu_*.png`                               |
 | Notebook narrative                      | `notebooks/analysis_synthesis.ipynb`                   | (re-renders from `reports/*.csv`)                            |
 

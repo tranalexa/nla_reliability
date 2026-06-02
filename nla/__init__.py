@@ -1,29 +1,33 @@
-"""Shared library for NLA reliability pipeline (extraction, inference, local analysis)."""
+"""Shared library for the NLA reliability pipeline.
+
+Module map:
+  paths              - filename + path helpers for all run_ids (canonical layout)
+  datasets           - HF dataset loaders (PRISM, BiasBios, MMLU)
+  nla_inference      - vendored Anthropic NLA AV (NLAClient) + AR (NLACritic) clients
+                       (from kitft/natural_language_autoencoders; see ATTRIBUTION.md)
+  g_theory           - p x i ANOVA G-study + D-study helpers
+  synthesis_metrics  - centered fidelity/consistency, text consistency, linear probes,
+                       summary stats, LaTeX table builder
+"""
 
 from nla.paths import (
     DATA_DIR,
-    DEFAULT_ACTIVATIONS_PERSONA,
-    DEFAULT_CSV,
-    DEFAULT_DESCRIPTIONS,
     ROOT,
-)
-from nla.prompt_modes import (
-    DEFAULT_PROMPT_MODE,
-    INFOBOX_SUFFIX,
-    apply_prompt_mode,
-    prepare_prompts,
-    resolve_activations_parquet,
+    RUN_IDS,
+    RUNS_DIR,
+    dataset_for_run,
+    mmlu_prompt_mode_for_run,
+    run_dir,
+    validate_run_id,
 )
 
 __all__ = [
     "DATA_DIR",
-    "DEFAULT_ACTIVATIONS_PERSONA",
-    "DEFAULT_CSV",
-    "DEFAULT_DESCRIPTIONS",
-    "DEFAULT_PROMPT_MODE",
-    "INFOBOX_SUFFIX",
     "ROOT",
-    "apply_prompt_mode",
-    "prepare_prompts",
-    "resolve_activations_parquet",
+    "RUN_IDS",
+    "RUNS_DIR",
+    "dataset_for_run",
+    "mmlu_prompt_mode_for_run",
+    "run_dir",
+    "validate_run_id",
 ]

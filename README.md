@@ -1,108 +1,96 @@
 # nla_reliability
 
-SelfDescribe prompts describe a fictional person. We run **Gemma-3-12B** once per prompt and save the **layer-32 last-token** hidden state (a 3840-d vector). A separate **activation verbalizer (AV)** never sees the prompt text—it only gets that vector and writes an explanation. We generate **12 stochastic** explanations per vector, then analyze consistency.
+Reliability evaluation layer on top of Anthropic's **Natural Language Autoencoders (NLA)**.
+We sample 400 items from four canonical runs (PRISM, Bias-in-Bios, MMLU + choices,
+MMLU question-only), extract Gemma-3-12B layer-32 activations, generate 12
+stochastic AV (Activation Verbalizer) descriptions per activation with the
+public NLA AV checkpoint, reconstruct each description back to an activation with
+the AR (Activation Reconstructor) checkpoint, and quantify reliability using
+mean-centered cosine fidelity/consistency, MPNet text-consistency, linear
+probes, and generalizability-theory variance decomposition.
 
-Everything heavy runs on [Modal](https://modal.com). Artifacts live on a persistent volume named **`nla-cache`**, which appears as the folder **`/cache`** inside GPU jobs (not a path on your laptop until you `modal volume get`).
+> **Built on Anthropic's Natural Language Autoencoders.**
+>
+> NLA is Anthropic / Transformer Circuits' framework for unsupervised
+> verbalization and reconstruction of LLM activations. This repo does **not**
+> retrain NLAs — it consumes Anthropic's pretrained AV/AR checkpoints
+> (released on Hugging Face via the kitft account) and adds a reliability-
+> evaluation layer on top. The inference client at
+> [`nla/nla_inference.py`](nla/nla_inference.py) is vendored unchanged from
+> kitft (MIT) and provides **both** `NLAClient` (AV, used in Step 2) and
+> `NLACritic` (AR, used in Step 3).
+>
+> - Research post: <https://www.anthropic.com/research/natural-language-autoencoders>
+> - Paper (Fraser-Taliente, Kantamneni, Ong, et al., Transformer Circuits, 2026):
+>   <https://transformer-circuits.pub/2026/nla/index.html>
+> - AV checkpoint: <https://huggingface.co/kitft/nla-gemma3-12b-L32-av>
+> - AR checkpoint: <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>
+> - Vendored client: <https://github.com/kitft/natural_language_autoencoders>
+>
+> ```bibtex
+> @article{frasertaliente2026nla,
+>   title  = {Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations},
+>   author = {Fraser-Taliente, Cody and Kantamneni, Sanjana and Ong, Ben and others},
+>   journal= {Transformer Circuits},
+>   year   = {2026},
+>   url    = {https://transformer-circuits.pub/2026/nla/index.html}
+> }
+> ```
+>
+> See [NOTICE](NOTICE), [CITATION.cff](CITATION.cff), and
+> [nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the full attribution stack.
 
-## Project layout
+---
+
+## Repo structure
 
 ```text
-extract_activations.py   # Modal Step 1 (run from repo root)
-sample_descriptions.py   # Modal Step 2
-reconstruct_scores.py    # Modal Step 3 (AR pairwise + fidelity)
-nla/                     # shared library
-  prompt_modes.py        # persona vs full extraction
-  paths.py               # data/ paths + Modal volume names
-  activation_utils.py    # CSV + parquet loading, optional live Gemma
-  nla_inference.py       # NLAClient / SGLang AV (vendored from kitft; see Attribution)
-scripts/                 # local tools (pull, preview, probes)
-data/                    # downloaded volume artifacts (gitignored)
+extract_activations.py        Modal Step 1 (Gemma forward pass; **not** Anthropic NLA code)
+sample_descriptions.py        Modal Step 2 (NLAClient = AV; uses Anthropic NLA checkpoint)
+reconstruct_scores.py         Modal Step 3 (NLACritic = AR; uses Anthropic NLA checkpoint)
+nla/
+  __init__.py                 Public re-exports
+  nla_inference.py            VENDORED FROM kitft — NLAClient + NLACritic
+  datasets.py                 PRISM / BiasBios / MMLU loaders (+ mmlu prompt modes)
+  paths.py                    run_id-keyed local + Modal volume path helpers
+  g_theory.py                 G-study + D-study variance decomposition
+  synthesis_metrics.py        Centered fidelity/consistency, probes, summary tables
+  ATTRIBUTION.md              Detailed attribution for the vendored inference client
+scripts/
+  pull_from_modal.py          Download artifacts from Modal volume per run_id
+  compute_text_consistency.py            Within-item MPNet cosine per run_id
+  compute_text_consistency_between.py    Between-item MPNet baseline per run_id
+  g_theory_study.py           G-theory study per run_id and metric
+  train_linear_probes.py      Majority + LR probes (profession / gender)
+  train_linear_probe_mmlu.py  Subject probes for MMLU runs
+  build_synthesis_tables.py   All reports/*.csv + reports/results_table.tex
+  generate_figure_bundle.py   All figures_bundle/*.png (the single figure output dir)
+  smoke_test_loaders.py       No-GPU sanity check that PRISM/BiasBios/MMLU load
+  diagnose_*.py / preview_descriptions.py  ad-hoc inspection utilities
+data/runs/<run_id>/           Local artifacts after pull_from_modal (gitignored)
+reports/                      Synthesis CSVs + LaTeX table (gitignored)
+figures_bundle/               17 paper figures (gitignored)
+notebooks/analysis_synthesis.ipynb   Source notebook (outputs cleared at commit)
+EXPERIMENT_OVERVIEW.md        Full conceptual write-up (provenance + design + metrics)
 ```
 
-### Attribution (`nla/nla_inference.py`)
+The four canonical **run_ids** (used everywhere in CLI flags + path helpers):
 
-Vendored from [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders) (`nla_inference.py` on main). Implements the **activation verbalizer** side of Natural Language Autoencoders (NLAs) from Anthropic / [Transformer Circuits (2026)](https://transformer-circuits.pub/2026/nla/index.html). This reliability repo does not retrain NLAs; it uses the published [Gemma-3 AV checkpoint](https://huggingface.co/kitft/nla-gemma3-12b-L32-av) on Modal.
-
----
-
-## Pipeline overview
-
-```text
-SelfDescribe CSV (400 rows)
-    → Step 1: Gemma forward → activations parquet
-    → Step 2: AV (SGLang) × 12 samples → descriptions parquet
-    → Step 3: AR (NLACritic) → pairwise_consistency + fidelity_scores parquets
-    → Pull to data/ → preview, linear probes (optional)
-```
-
-Row index `i` is aligned everywhere: same persona in CSV, activation `i`, and description rows with `activation_idx == i`.
-
----
-
-## Step 1 — Extract activations
-
-**Concept:** An “activation” here is Gemma’s internal representation **right after reading** the prompt (last non-padding token, layer 32), L2-normalized. That snapshot is what we later feed to the AV.
-
-**Why persona-only (default)?** Every SelfDescribe prompt ends with the same line asking for a Wikipedia infobox. If we include that in the forward pass, the last token encodes “write an infobox,” not the persona—and AV outputs get generic/meta. Default mode strips that suffix and runs Gemma on the persona sentence only.
-
-| | |
-|--|--|
-| Script | `extract_activations.py` |
-| Model | `google/gemma-3-12b-pt` |
-| **Default** | `persona-only` |
-| Full prompt | `--full` |
-
-| Mode | What Gemma reads | Output on volume |
-|------|------------------|------------------|
-| `persona-only` **(default)** | Persona text only | `activations_layer32_persona-only_gemma-3-12b-pt.parquet` |
-| `full` | Entire `user_prompt` | `activations_layer32_full_…parquet` + legacy `activations_layer32.parquet` |
-
-Exact suffix removed in persona mode:
-
-```text
-Write a hypothetical but realistic Wikipedia biography infobox for me.
-```
-
----
-
-## Step 2 — Sample descriptions
-
-**Concept:** The AV is a fine-tuned Gemma that takes your vector (injected at a special token in a fixed investigator template) and autoregresses an `<explanation>…</explanation>` block. Temperature 1.0 → different wording each time. **Reliability** = how stable those wordings are for the **same** vector.
-
-**Default:** Uses persona-only activations from Step 1. Pass `--full` only if Step 1 was run with `--full`.
-
-| | |
-|--|--|
-| Script | `sample_descriptions.py` |
-| AV model | `kitft/nla-gemma3-12b-L32-av` |
-| Output | `descriptions.parquet` (400 activations × 12 samples = 4800 rows) |
-
-Expect AV text in a structured “investigator” style (often mentions tone, a paraphrased phrase, and what the model might say next)—not a clean copy of the CSV sentence.
-
----
-
-## Step 3 — AR reconstruction + scores
-
-**Concept:** The AR (activation reconstructor) maps each AV description back to a 3840-d vector. **Pairwise consistency** = cosine similarity between reconstructions from different samples of the same activation (66 pairs × 400 activations = 26,400 rows, kept separate for G-theory). **Fidelity** = cosine similarity between each reconstruction and the original activation (4,800 rows).
-
-**Default:** Uses persona-only activations from Step 1 (same file Step 2 read).
-
-| | |
-|--|--|
-| Script | `reconstruct_scores.py` |
-| AR model | `kitft/nla-gemma3-12b-L32-ar` |
-| Inputs | persona activations parquet + `descriptions.parquet` |
-| Outputs | `pairwise_consistency.parquet` (26,400 rows), `fidelity_scores.parquet` (4,800 rows) |
-
-Pairwise cos uses L2-normalized reconstructions (`reconstruct()` returns raw vectors). Fidelity uses `NLACritic.score()`, which normalizes internally.
-
-Expected sanity-check ranges: pairwise and fidelity cos roughly 0.5–0.95, no NaNs.
+| run_id          | dataset    | prompt format                                       |
+|-----------------|------------|-----------------------------------------------------|
+| `prism`         | prism      | last user turn of a multi-turn chat                 |
+| `biosbias`      | biosbias   | full biography (gender-scrubbed)                    |
+| `mmlu_choice`   | mmlu       | `Question: … \n A.… B.… C.… D.… \n Answer:`         |
+| `mmlu_nochoice` | mmlu       | question stem only (choices kept as CSV metadata)   |
 
 ---
 
 ## Setup (once per machine)
 
-You need [uv](https://docs.astral.sh/uv/), a Modal account, and Hugging Face access to gated Gemma + AV weights.
+You need [uv](https://docs.astral.sh/uv/) (or plain pip), a Modal account, and
+a Hugging Face token with read access to Gemma-3 + the kitft NLA checkpoints.
+
+### Install with uv (preferred)
 
 ```bash
 uv sync
@@ -110,127 +98,228 @@ uv run modal setup
 modal secret create --force huggingface HF_TOKEN=<your_hf_token>
 ```
 
-Accept licenses: [gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt), [nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av), [nla-gemma3-12b-L32-ar](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar).
+### Install with pip (alternative)
+
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+modal setup
+modal secret create --force huggingface HF_TOKEN=<your_hf_token>
+```
+
+`requirements.txt` is generated from `uv.lock`
+(`uv export --format requirements.txt --no-dev > requirements.txt`); the
+canonical lockfile is still `uv.lock` so `uv sync` is the most reliable path.
+
+### Accept Hugging Face licenses
+
+- [google/gemma-3-12b-pt](https://huggingface.co/google/gemma-3-12b-pt)
+- [kitft/nla-gemma3-12b-L32-av](https://huggingface.co/kitft/nla-gemma3-12b-L32-av)
+- [kitft/nla-gemma3-12b-L32-ar](https://huggingface.co/kitft/nla-gemma3-12b-L32-ar)
+
+`LabHC/bias_in_bios` and `cais/mmlu` are publicly accessible.
+
+### Smoke test (no GPU, no Modal)
+
+```bash
+HF_TOKEN=<your_hf_token> uv run python scripts/smoke_test_loaders.py
+```
+
+Loads 5 items from each dataset and prints prompt previews. Expected ending:
+
+```
+  PASS  prism
+  PASS  biosbias
+  PASS  mmlu
+
+All dataset loaders OK.
+```
+
+You can also dry-run the local analysis chain (only checks file presence and
+schemas; no compute):
+
+```bash
+uv run python scripts/build_synthesis_tables.py --dry-run
+```
 
 ---
 
-## Run on Modal
+## End-to-end Modal pipeline
 
-### Step 1 — activations (~5–15 min, 1× A100)
+All three Modal jobs accept `--run-id <id>` for a single run, or `--all-runs`
+for all four. Outputs land on the Modal volume `nla-cache` (mounted at
+`/cache` inside containers) under `/cache/runs/<run_id>/`.
 
-```bash
-uv run modal run extract_activations.py
+> **Heads-up on `--all-runs`:** running back-to-back jobs occasionally trips
+> Modal's transient "open files preventing the operation" error on the shared
+> volume. If that happens, just rerun the failing run_id individually.
 
-# Optional: full prompt (for comparison / ablations)
-uv run modal run extract_activations.py --full
-```
-
-### Step 2 — AV descriptions (~30–90 min, 12× A100 by default)
-
-```bash
-uv run modal run sample_descriptions.py
-
-# Only if Step 1 used --full:
-uv run modal run sample_descriptions.py --full
-```
-
-Fewer GPUs: `uv run modal run sample_descriptions.py --n-shards 1`
-
-### Step 3 — AR scores (~15–45 min, 12× A100 by default)
+### Step 1 — Extract activations (≈ 5–15 min per run, 1× A100)
 
 ```bash
-uv run modal run reconstruct_scores.py
+uv run modal run extract_activations.py --run-id prism         --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id biosbias      --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id mmlu_choice   --n-items 400 --seed 42
+uv run modal run extract_activations.py --run-id mmlu_nochoice --n-items 400 --seed 42
+# or:
+uv run modal run extract_activations.py --all-runs --n-items 400 --seed 42
 ```
 
-Fewer GPUs: `uv run modal run reconstruct_scores.py --n-shards 1`
+### Step 2 — Sample AV descriptions (≈ 30–90 min per run, up to 12× A100-80GB)
+
+```bash
+uv run modal run sample_descriptions.py --run-id prism         --n-samples 12
+uv run modal run sample_descriptions.py --run-id biosbias      --n-samples 12
+uv run modal run sample_descriptions.py --run-id mmlu_choice   --n-samples 12
+uv run modal run sample_descriptions.py --run-id mmlu_nochoice --n-samples 12
+# or:
+uv run modal run sample_descriptions.py --all-runs --n-samples 12
+```
+
+Limit parallel GPUs with `--n-shards 1` (or any value ≤ 12) if you don't have
+the quota.
+
+### Step 3 — AR reconstruction + scoring (≈ 15–45 min per run, up to 12× A100)
+
+Pass `--save-vectors` so the centered-cosine diagnostics work locally.
+
+```bash
+uv run modal run reconstruct_scores.py --run-id prism         --save-vectors
+uv run modal run reconstruct_scores.py --run-id biosbias      --save-vectors
+uv run modal run reconstruct_scores.py --run-id mmlu_choice   --save-vectors
+uv run modal run reconstruct_scores.py --run-id mmlu_nochoice --save-vectors
+# or:
+uv run modal run reconstruct_scores.py --all-runs --save-vectors
+```
+
+Raw fidelity / pairwise cosines will sit near 0.99. That is **expected** —
+activation space has a strong shared mean direction and raw cosines must be
+read in tandem with the centered diagnostics generated downstream (see
+`scripts/build_synthesis_tables.py` and the notebook).
 
 ---
 
-## Pull results locally (`data/`)
-
-**Concept:** Modal keeps files on the cloud volume. We copy the pieces you need into **`data/`** so local scripts have one place to look (not scattered at repo root).
+## Local analysis (after the Modal pipeline finishes)
 
 ```bash
-# Default: CSV + persona activations + descriptions
-uv run python scripts/pull_from_modal.py
+# 1. Pull all four runs into data/runs/<run_id>/
+uv run python scripts/pull_from_modal.py --all-runs
 
-# Also pull full-prompt activation parquets (after Step 1 --full)
-uv run python scripts/pull_from_modal.py --full
+# 2. Compute MPNet text consistency for each run (~minutes on CPU)
+uv run python scripts/compute_text_consistency.py         --all-runs
+uv run python scripts/compute_text_consistency_between.py --all-runs
 
-# Subset only
-uv run python scripts/pull_from_modal.py --only csv,descriptions
-```
+# 3. G-theory study per run + metric (writes per-run g_theory_*.csv)
+for r in prism biosbias mmlu_choice mmlu_nochoice; do
+  uv run python scripts/g_theory_study.py --run-id "$r" --metric all
+done
 
-Manual equivalent (same destinations):
-
-```bash
-modal volume get nla-cache /cache/selfdescribe_400.csv data/selfdescribe_400.csv
-modal volume get nla-cache /cache/descriptions.parquet data/descriptions.parquet
-modal volume get nla-cache /cache/activations_layer32_persona-only_gemma-3-12b-pt.parquet \
-  data/activations_layer32_persona-only_gemma-3-12b-pt.parquet
-modal volume get nla-cache pairwise_consistency.parquet data/pairwise_consistency.parquet
-modal volume get nla-cache fidelity_scores.parquet data/fidelity_scores.parquet
-```
-
-Preview (reads from `data/` by default):
-
-```bash
-uv run python scripts/preview_descriptions.py
-# → scripts/description_preview.txt
-```
-
-If a pull fails: `modal volume ls nla-cache`, or match the path from Step 1 logs (`output parquet -> ...`).
-
----
-
-## Volume artifacts (`nla-cache` → `/cache` in jobs)
-
-| Path | What it is |
-|------|------------|
-| `selfdescribe_400.csv` | 400 prompts + `attr_class` / `attr` labels |
-| `activations_layer32_persona-only_gemma-3-12b-pt.parquet` | Default vectors (persona last-token) |
-| `activations_layer32.parquet` | Legacy alias; only written when Step 1 uses `--full` |
-| `descriptions.parquet` | `activation_idx`, `sample_idx`, `description` |
-| `hf/` | Cached model weights (reuse across runs) |
-
----
-
-## Linear probes (optional, local CPU)
-
-**Concept:** A quick sanity check—not the main reliability metric. We train a simple logistic regression on activations to predict dataset labels within each `attr_class` (Gender, Religion, Occupation, Country). If persona-only activations beat full-prompt ones on probe accuracy (especially where full-prompt was near the majority baseline), extraction is carrying more persona signal.
-
-```bash
-uv run python scripts/pull_from_modal.py
+# 4. Linear probes (profession/gender on PRISM+BiasBios, subject on MMLU runs)
 uv run python scripts/train_linear_probes.py
+uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_choice
+uv run python scripts/train_linear_probe_mmlu.py --run-id mmlu_nochoice
 
-# Compare to full-prompt activations (pull after Step 1 --full):
-uv run python scripts/pull_from_modal.py --full
-uv run python scripts/train_linear_probes.py \
-  --compare-activations data/activations_layer32_full_gemma-3-12b-pt.parquet
+# 5. Synthesise every reports/*.csv + reports/results_table.tex
+uv run python scripts/build_synthesis_tables.py
+
+# 6. Render every figures_bundle/*.png (the single figure output dir)
+uv run python scripts/generate_figure_bundle.py
+
+# 7. Execute the analysis notebook (uses the CSVs from step 5)
+uv run jupyter nbconvert --to notebook --execute \
+    notebooks/analysis_synthesis.ipynb --inplace
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--activations` | Which parquet to probe (default: `data/…persona-only…parquet`) |
-| `--compare-activations` | Second parquet; prints side-by-side accuracies |
-| `--csv` | Prompts/labels (default: `data/selfdescribe_400.csv`) |
+If you want to inspect AV samples interactively:
+
+```bash
+uv run python scripts/preview_descriptions.py --run-id prism --num-samples 3
+```
 
 ---
 
-## End to end pipeline
+## Script → paper figure / table map
 
-```bash
-uv sync && uv run modal setup
-# set HF token once: modal secret create --force huggingface HF_TOKEN=...
+Every figure and table in the paper is regenerated by exactly one (or a small
+pipeline of) scripts in this repo:
 
-uv run modal run extract_activations.py
-uv run modal run sample_descriptions.py
-uv run modal run reconstruct_scores.py
+| Paper artifact                          | Generator                                              | Output                                                       |
+|-----------------------------------------|--------------------------------------------------------|--------------------------------------------------------------|
+| Headline metrics table                  | `scripts/build_synthesis_tables.py`                    | `reports/synthesis_headline_metrics.csv`                     |
+| LaTeX results table                     | `scripts/build_synthesis_tables.py`                    | `reports/results_table.tex`                                  |
+| Per-run summary (mean/std/p5/p95)       | `scripts/build_synthesis_tables.py`                    | `reports/summary_stats.csv`                                  |
+| Data inventory                          | `scripts/build_synthesis_tables.py`                    | `reports/synthesis_inventory.csv`                            |
+| Text consistency (within / between)     | `scripts/compute_text_consistency*.py` → `build_synthesis_tables.py` | `reports/synthesis_text_consistency.csv`         |
+| Linear probes (incl. majority baseline) | `scripts/train_linear_probes*.py` → `build_synthesis_tables.py`      | `reports/synthesis_linear_probes.csv`            |
+| G-study variance decomposition          | `scripts/g_theory_study.py` → `build_synthesis_tables.py`            | `reports/synthesis_g_theory_variance.csv`        |
+| D-study (G_rel by n′)                   | `scripts/g_theory_study.py` → `build_synthesis_tables.py`            | `reports/synthesis_g_theory_d_study.csv`         |
+| Fig. centered fidelity (matched/mismatched/gap) | `scripts/generate_figure_bundle.py`            | `figures_bundle/01_centered_fidelity.png`                    |
+| Fig. centered consistency               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/02_centered_consistency.png`                 |
+| Fig. centered gaps (fidelity + consistency) | `scripts/generate_figure_bundle.py`              | `figures_bundle/03_centered_gaps.png`                        |
+| Fig. text consistency (MPNet)           | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04_text_consistency_mpnet.png`               |
+| Fig. text within vs between (MPNet)     | `scripts/generate_figure_bundle.py`                    | `figures_bundle/04b_text_within_vs_between_mpnet.png`        |
+| Fig. linear probe accuracies            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/05_linear_probes.png`                        |
+| Fig. G-theory overview                  | `scripts/generate_figure_bundle.py`                    | `figures_bundle/06_gtheory_overview.png`                     |
+| Fig. G-study variance components        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07a_fidelity_variance_components.png`, `07b_consistency_variance_components.png` |
+| Fig. D-study G_rel curves               | `scripts/generate_figure_bundle.py`                    | `figures_bundle/07c_fidelity_dstudy.png`, `07d_consistency_dstudy.png`, `08_dstudy_side_by_side.png` |
+| Fig. G_rel(n′=1) vs G_rel(n′=12)        | `scripts/generate_figure_bundle.py`                    | `figures_bundle/09_grel_n1_vs_n12.png`                       |
+| Fig. raw score distributions            | `scripts/generate_figure_bundle.py`                    | `figures_bundle/10_raw_score_distributions.png`              |
+| Fig. per-item fidelity vs consistency   | `scripts/generate_figure_bundle.py`                    | `figures_bundle/11_per_item_fid_vs_consistency.png`          |
+| MMLU prompt mode side-by-side           | `scripts/generate_figure_bundle.py` + notebook §6      | `figures_bundle/1?_mmlu_*.png`                               |
+| Notebook narrative                      | `notebooks/analysis_synthesis.ipynb`                   | (re-renders from `reports/*.csv`)                            |
 
-uv run python scripts/pull_from_modal.py
+See the comments at the top of each script for input schemas.
 
-uv run python scripts/preview_descriptions.py
-uv run python scripts/train_linear_probes.py
-```
+---
 
-**Check you’re done:** `data/descriptions.parquet` has 4800 rows; preview shows persona text (no infobox line) and AV text about the persona theme, not only “Wikipedia generator.” After Step 3: `pairwise_consistency.parquet` has 26,400 rows, `fidelity_scores.parquet` has 4,800 rows; Modal logs show mean cos ~0.5–0.95 and no NaNs.
+## Reproducibility notes
+
+- **Pinned seeds.** `seed=42` propagates through dataset sampling (PRISM
+  shuffle, BiasBios stratified split, MMLU subject sampling) and is printed
+  at job start in `extract_activations.py`, `sample_descriptions.py`, and
+  `train_linear_probe*.py`. The Gemma-3 forward pass is deterministic given
+  identical bf16 weights and inputs.
+- **SGLang sampling is non-deterministic.** Step 2 draws 12 AV samples per
+  activation at temperature 1.0 through SGLang. Reruns will produce
+  different descriptions and slightly different raw cosines, but the
+  *aggregate* metrics (centered fidelity gap, within-item vs between-item
+  MPNet, G_rel, probe accuracy) should match within run-to-run noise. This
+  is expected behavior for stochastic verbalization at T=1.0.
+- **Hardware.** Step 1 needs one A100 (≈ 15 GB peak). Step 2/3 default to 12
+  shards × A100 each but degrade gracefully with `--n-shards`. Local
+  analysis is CPU-only and runs in a few minutes on a laptop.
+- **Storage.** Each run produces about 50 MB of parquets; the four-run
+  superset is ~ 200 MB and lives entirely on the Modal volume until you
+  pull it.
+- **Expected row counts per run.** 400 items × 12 AV samples = 4,800
+  description rows and 4,800 fidelity rows; C(12, 2) × 400 = 26,400
+  pairwise rows; 4,800 reconstruction vectors (with `--save-vectors`).
+
+The grader's recipe (and the recommended pre-submission check the author
+should re-run) is exactly the eight steps in
+[Local analysis](#local-analysis-after-the-modal-pipeline-finishes) above,
+plus the four Modal jobs that produce the inputs.
+
+---
+
+## Code reuse and attribution
+
+This repo's original contribution is the reliability-evaluation layer:
+Step 1 (vanilla HuggingFace activation extraction) and everything in
+`scripts/`, `nla/g_theory.py`, `nla/synthesis_metrics.py`, the figure bundle,
+the notebook, and the docs. NLA itself (the AV/AR architecture and the
+pretrained checkpoints) is Anthropic's, and the inference client is kitft's.
+
+| What                              | Who          | Where                                                          |
+|-----------------------------------|--------------|----------------------------------------------------------------|
+| NLA method                        | Anthropic    | [Transformer Circuits 2026](https://transformer-circuits.pub/2026/nla/index.html), [research post](https://www.anthropic.com/research/natural-language-autoencoders) |
+| AV checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-av>      |
+| AR checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>      |
+| Inference client (`NLAClient` + `NLACritic`) | kitft (MIT) | [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders), vendored at [`nla/nla_inference.py`](nla/nla_inference.py) |
+| Reliability evaluation layer      | this repo (MIT) | everything else                                            |
+
+Read [NOTICE](NOTICE) for the formal attribution block,
+[CITATION.cff](CITATION.cff) for citation metadata, and
+[nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the per-file vendored-code notes.
+Conceptual write-up of the reliability methodology is in
+[EXPERIMENT_OVERVIEW.md](EXPERIMENT_OVERVIEW.md).

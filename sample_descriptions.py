@@ -1,15 +1,27 @@
 """Step 2: sample AV descriptions from activations via SGLang + NLAClient on Modal.
 
+Uses **Anthropic NLA** infrastructure: the AV (activation verbalizer) checkpoint
+``kitft/nla-gemma3-12b-L32-av`` released by Anthropic and the vendored
+``NLAClient`` from kitft/natural_language_autoencoders (see
+``nla/ATTRIBUTION.md``). The client injects each pre-extracted activation
+vector into SGLang as a custom input embedding and streams ``n_samples``
+stochastic descriptions per activation at temperature 1.0.
+
 Prerequisites:
-  1. Step 1 done on nla-cache (activations parquet on volume)
-  2. Accept license for kitft/nla-gemma3-12b-L32-av on HuggingFace
+  1. Step 1 completed (run-specific activations parquet on volume)
+  2. License accepted for kitft/nla-gemma3-12b-L32-av on HuggingFace
   3. modal secret create --force huggingface HF_TOKEN=<token>
 
 Run:
-  uv run modal run sample_descriptions.py
-  uv run modal run sample_descriptions.py --full
-  uv run modal run sample_descriptions.py \\
-    --activations /cache/activations_layer32_full_gemma-3-12b-pt.parquet
+  uv run modal run sample_descriptions.py --run-id prism
+  uv run modal run sample_descriptions.py --run-id biosbias
+  uv run modal run sample_descriptions.py --run-id mmlu_choice
+  uv run modal run sample_descriptions.py --run-id mmlu_nochoice
+  uv run modal run sample_descriptions.py --all-runs --n-samples 12
+
+Random seed: SGLang sampling at temperature 1.0 is **not** bit-identical across
+hardware. Reruns will produce different descriptions but should match in
+aggregate (within-item / between-item MPNet cosine + reliability ranking).
 """
 
 import os
@@ -26,7 +38,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 AV_MODEL = "kitft/nla-gemma3-12b-L32-av"
-N_SAMPLES = 12
+N_SAMPLES_DEFAULT = 12
 TEMPERATURE = 1.0
 MAX_NEW_TOKENS = 500
 PORT = 30000
@@ -39,7 +51,6 @@ N_SHARDS_DEFAULT = 12
 CACHE = "/cache"
 HF_CACHE = f"{CACHE}/hf"
 HF_HUB_CACHE = f"{CACHE}/hf/hub"
-DEFAULT_DESCRIPTIONS_PARQUET = f"{CACHE}/descriptions.parquet"
 SGLANG_URL = f"http://127.0.0.1:{PORT}"
 
 NLA_PKG = Path(__file__).resolve().parent / "nla"
@@ -63,8 +74,9 @@ image = (
 )
 
 
-def shard_parquet(shard_id: int) -> str:
-    return f"{CACHE}/descriptions_shard{shard_id}.parquet"
+def shard_parquet(shard_id: int, run_id: str, dataset: str) -> str:
+    """Per-shard temp parquet path on the volume."""
+    return f"{CACHE}/runs/{run_id}/descriptions_{dataset}_shard{shard_id}.parquet"
 
 
 def setup_hf_cache() -> None:
@@ -79,7 +91,7 @@ def hf_token() -> str:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not token:
         raise RuntimeError(
-            "HF_TOKEN missing in container. Overwrite secret:\n"
+            "HF_TOKEN missing in container. Set it with:\n"
             "  modal secret create --force huggingface HF_TOKEN=<token>"
         )
     os.environ["HF_TOKEN"] = token
@@ -87,6 +99,7 @@ def hf_token() -> str:
 
 
 def download_av() -> str:
+    """Snapshot-download the Anthropic AV checkpoint to the volume HF cache."""
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import HfHubHTTPError
 
@@ -103,22 +116,14 @@ def download_av() -> str:
 
 def start_sglang(model_dir: str) -> subprocess.Popen:
     cmd = [
-        "python",
-        "-m",
-        "sglang.launch_server",
-        "--model-path",
-        model_dir,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(PORT),
+        "python", "-m", "sglang.launch_server",
+        "--model-path", model_dir,
+        "--host", "0.0.0.0",
+        "--port", str(PORT),
         "--disable-radix-cache",
-        "--context-length",
-        "512",
-        "--mem-fraction-static",
-        "0.75",
-        "--cuda-graph-max-bs",
-        str(CONCURRENCY),
+        "--context-length", "512",
+        "--mem-fraction-static", "0.75",
+        "--cuda-graph-max-bs", str(CONCURRENCY),
         "--skip-server-warmup",
         "--trust-remote-code",
     ]
@@ -132,7 +137,7 @@ def wait_ready(process: subprocess.Popen, timeout: int = READY_TIMEOUT) -> None:
             if process.poll() is not None:
                 raise RuntimeError(
                     f"SGLang exited with code {process.returncode} "
-                    "(often -9/OOM or CUDA graph failure — check logs above)"
+                    "(often -9/OOM or CUDA graph failure - check logs above)"
                 )
             try:
                 http.get(f"{SGLANG_URL}/health", timeout=5.0).raise_for_status()
@@ -143,6 +148,7 @@ def wait_ready(process: subprocess.Popen, timeout: int = READY_TIMEOUT) -> None:
 
 
 def _make_client(av_dir: str):
+    """Build an NLAClient with a higher-concurrency HTTP client for SGLang."""
     import numpy as np
     import torch
     from nla.nla_inference import NLAClient
@@ -184,6 +190,8 @@ def _draw(client, embeds_np) -> str:
 
 
 class _EmbedCache:
+    """Thread-safe cache of NLAClient-built input embeddings, keyed by activation_idx."""
+
     def __init__(self, client, np, torch):
         self._client = client
         self._np = np
@@ -215,7 +223,15 @@ def _one_sample(cache: _EmbedCache, client, activation_idx: int, sample_idx: int
     volumes={CACHE: vol},
     secrets=[modal.Secret.from_name("huggingface")],
 )
-def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
+def run_shard(
+    shard_id: int,
+    n_shards: int,
+    activations_parquet: str,
+    run_id: str,
+    dataset: str,
+    n_samples: int,
+):
+    """One GPU shard: serve SGLang locally and emit AV descriptions for ``shard_id mod n_shards``."""
     sys.path.insert(0, "/root")
 
     vol.reload()
@@ -223,8 +239,7 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
 
     if not Path(activations_parquet).exists():
         raise FileNotFoundError(
-            f"missing {activations_parquet} — run extract_activations.py first "
-            "(e.g. --prompt-mode persona-only)"
+            f"missing {activations_parquet} - run extract_activations.py first"
         )
 
     table = pq.read_table(activations_parquet)
@@ -234,7 +249,8 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
         raise ValueError(f"empty {activations_parquet}")
 
     indices = [i for i in range(n_activations) if i % n_shards == shard_id]
-    out_path = shard_parquet(shard_id)
+    out_path = shard_parquet(shard_id, run_id, dataset)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     print(
         f"shard {shard_id}/{n_shards}: {len(indices)} activations "
         f"from {activations_parquet} -> {out_path}"
@@ -250,16 +266,16 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
         cache = _EmbedCache(client, np, torch)
         print(
             f"shard {shard_id}: concurrency={CONCURRENCY} "
-            f"max_new_tokens={MAX_NEW_TOKENS} embed_cache=on"
+            f"max_new_tokens={MAX_NEW_TOKENS} n_samples={n_samples} temperature={TEMPERATURE}"
         )
 
-        total = len(indices) * N_SAMPLES
+        total = len(indices) * n_samples
         rows = []
         with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
             futures = [
                 pool.submit(_one_sample, cache, client, i, s, vectors[i])
                 for i in indices
-                for s in range(N_SAMPLES)
+                for s in range(n_samples)
             ]
             for n, fut in enumerate(as_completed(futures), 1):
                 rows.append(fut.result())
@@ -281,55 +297,53 @@ def run_shard(shard_id: int, n_shards: int, activations_parquet: str):
     timeout=600,
     volumes={CACHE: vol},
 )
-def merge_shards(n_shards: int, output_parquet: str = DEFAULT_DESCRIPTIONS_PARQUET):
+def merge_shards(n_shards: int, run_id: str, dataset: str, output_parquet: str, n_samples: int):
+    """Concatenate per-shard parquets into the final descriptions parquet for this run."""
     vol.reload()
     out = Path(output_parquet)
+    out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
         print(f"removed stale {output_parquet}")
+
     dfs = []
     for shard_id in range(n_shards):
-        path = shard_parquet(shard_id)
+        path = shard_parquet(shard_id, run_id, dataset)
         if not Path(path).exists():
-            raise FileNotFoundError(f"missing {path} — shard {shard_id} did not finish")
+            raise FileNotFoundError(f"missing {path} - shard {shard_id} did not finish")
         dfs.append(pd.read_parquet(path))
+
     df = pd.concat(dfs, ignore_index=True)
     df = df.sort_values(["activation_idx", "sample_idx"]).reset_index(drop=True)
     n_act = df["activation_idx"].nunique()
-    expected = n_act * N_SAMPLES
+    expected = n_act * n_samples
     assert len(df) == expected, (
-        f"expected {expected} rows ({n_act} activations × {N_SAMPLES}), got {len(df)}"
+        f"expected {expected} rows ({n_act} activations x {n_samples}), got {len(df)}"
     )
     df.to_parquet(output_parquet, index=False)
     vol.commit()
     print(f"merged {len(df)} rows -> {output_parquet}")
 
 
-@app.local_entrypoint()
-def main(
-    n_shards: int = N_SHARDS_DEFAULT,
-    activations: str = "",
-    prompt_mode: str = "persona-only",
-    full: bool = False,
-    output: str = DEFAULT_DESCRIPTIONS_PARQUET,
-    model_id: str = "google/gemma-3-12b-pt",
-    layer: int = 32,
-):
+def _run_one(run_id: str, n_shards: int, n_samples: int) -> None:
+    """Drive shards + merge for a single run_id."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from nla.prompt_modes import resolve_activations_parquet
-
-    if full:
-        prompt_mode = "full"
-    activations_parquet = resolve_activations_parquet(
-        CACHE,
-        activations=activations or None,
-        prompt_mode=prompt_mode,
-        model_id=model_id,
-        layer=layer,
+    from nla.paths import (
+        dataset_for_run,
+        volume_activations_path,
+        volume_descriptions_path,
     )
-    output_parquet = output if output.startswith("/") else f"{CACHE}/{output.lstrip('/')}"
-    print(f"activations: {activations_parquet}")
-    print(f"output: {output_parquet}")
+
+    dataset = dataset_for_run(run_id)
+    activations_parquet = volume_activations_path(run_id)
+    output_parquet = volume_descriptions_path(run_id)
+
+    print(f"\n=== Sampling descriptions: {run_id} ({dataset}) ===")
+    print(f"  activations: {activations_parquet}")
+    print(f"  output:      {output_parquet}")
+    print(f"  n_samples:   {n_samples}  n_shards: {n_shards}")
+    print(f"  temperature: {TEMPERATURE}  (no seed: SGLang T={TEMPERATURE} sampling is")
+    print( "               non-deterministic across hardware; reruns will differ)")
 
     list(
         run_shard.map(
@@ -337,7 +351,38 @@ def main(
             kwargs={
                 "n_shards": n_shards,
                 "activations_parquet": activations_parquet,
+                "run_id": run_id,
+                "dataset": dataset,
+                "n_samples": n_samples,
             },
         )
     )
-    merge_shards.remote(n_shards, output_parquet=output_parquet)
+    merge_shards.remote(
+        n_shards=n_shards,
+        run_id=run_id,
+        dataset=dataset,
+        output_parquet=output_parquet,
+        n_samples=n_samples,
+    )
+
+
+@app.local_entrypoint()
+def main(
+    run_id: str = "prism",
+    all_runs: bool = False,
+    n_shards: int = N_SHARDS_DEFAULT,
+    n_samples: int = N_SAMPLES_DEFAULT,
+):
+    """
+    --run-id     prism | biosbias | mmlu_choice | mmlu_nochoice  (default: prism)
+    --all-runs   run all four canonical runs in sequence
+    --n-shards   parallel GPU workers per run (default: 12)
+    --n-samples  AV samples per activation (default: 12)
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from nla.paths import RUN_IDS, validate_run_id
+
+    runs = list(RUN_IDS) if all_runs else [run_id]
+    for r in runs:
+        validate_run_id(r)
+        _run_one(r, n_shards=n_shards, n_samples=n_samples)

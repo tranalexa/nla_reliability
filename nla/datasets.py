@@ -1,0 +1,368 @@
+"""Dataset loading for the NLA reliability evaluation pipeline.
+
+Provides ``load_dataset_items()`` with a common schema:
+
+  item_idx    (int)  — zero-based index; aligned with activation_idx in all outputs
+  dataset     (str)  — "prism" | "biosbias" | "mmlu"
+  prompt_text (str)  — text passed to Gemma for activation extraction
+
+Additional metadata columns are dataset-specific and are not required by the
+core pipeline (Steps 1-3). They are preserved in the per-run CSV for
+downstream diagnostic grouping.
+
+  PRISM metadata:    gender (model-predicted), gt_gender (survey ground truth)
+  BiasBios metadata: profession, gender (used for stratified 50/50 sampling)
+  MMLU metadata:     subject, question, choices (JSON), answer, split
+
+MMLU supports two prompt modes (``mmlu_prompt_mode`` argument), one per run_id:
+
+  "with_choices"  → prompt_text = "Question: ...\\n\\nA. ...\\nB. ...\\nC. ...\\nD. ...\\n\\nAnswer:"
+                    (used by run_id ``mmlu_choice``)
+  "question_only" → prompt_text = question stem only
+                    (used by run_id ``mmlu_nochoice``)
+
+Seeds: PRISM (HF dataset shuffle), BiasBios (stratified split), and MMLU
+(subject subsample) all use ``seed=42`` by default. The same seed produces the
+same 400-item ordering across machines as long as the upstream HF dataset
+revisions are identical.
+"""
+from __future__ import annotations
+
+import re
+
+import numpy as np
+import pandas as pd
+
+SUPPORTED_DATASETS: list[str] = ["prism", "biosbias", "mmlu"]
+
+DEFAULT_N_ITEMS = 400
+DEFAULT_SEED = 42
+
+
+# ── PRISM ─────────────────────────────────────────────────────────────────────
+
+PRISM_HF_SLUG = "Transluce/PRISM-gender-Llama-3.1-8B-Instruct"
+
+
+def _flatten_prism_conversation(record: dict) -> str:
+    """Serialize a PRISM multi-turn conversation to a single string.
+
+    All turns up to and including the last user turn are kept; trailing
+    assistant turns are dropped so the final token in the Gemma forward pass
+    is the last user token.  Each turn is prefixed "User:" / "Assistant:".
+    """
+    conv = record.get("conversation") or record.get("messages") or record.get("turns")
+    if conv is None:
+        raise KeyError(
+            f"No conversation field in PRISM record. Keys: {sorted(record.keys())}"
+        )
+    turns = list(conv)
+    while turns and turns[-1].get("role", "").lower() in ("assistant", "model"):
+        turns = turns[:-1]
+    if not turns:
+        raise ValueError("PRISM record has no user turns after stripping assistant tail")
+    parts: list[str] = []
+    for t in turns:
+        role = t.get("role", "user").lower()
+        content = t.get("content", "")
+        label = "User" if role == "user" else "Assistant"
+        parts.append(f"{label}: {content}")
+    return "\n".join(parts)
+
+
+def _load_prism(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.DataFrame:
+    from datasets import load_dataset as hf_load  # noqa: PLC0415
+
+    ds = hf_load(PRISM_HF_SLUG, split="train", token=hf_token)
+    ds = ds.shuffle(seed=seed).select(range(n_items))
+    rows = []
+    for i, record in enumerate(ds):
+        rows.append(
+            {
+                "item_idx": i,
+                "dataset": "prism",
+                "prompt_text": _flatten_prism_conversation(record),
+                "gender": str(record.get("attr", "")),
+                "gt_gender": str(record.get("gt_attr", "")),
+            }
+        )
+    df = pd.DataFrame(rows)
+    assert len(df) == n_items, f"Expected {n_items} PRISM items, got {len(df)}"
+    return df
+
+
+# ── Bias in Bios ──────────────────────────────────────────────────────────────
+
+BIOSBIAS_HF_SLUG = "LabHC/bias_in_bios"
+
+_PRONOUNS = [
+    r"\bhe\b", r"\bshe\b", r"\bhim\b", r"\bher\b", r"\bhis\b", r"\bhers\b",
+    r"\bhimself\b", r"\bherself\b",
+    r"\bhe'd\b", r"\bshe'd\b", r"\bhe's\b", r"\bshe's\b",
+    r"\bhe'll\b", r"\bshe'll\b",
+]
+_HONORIFICS = [
+    r"\bMr\.?\b", r"\bMrs\.?\b", r"\bMs\.?\b", r"\bMiss\b",
+    r"\bSir\b", r"\bMadam\b", r"\bMa'am\b",
+]
+_GENDERED_NOUNS = [
+    r"\bbrother\b", r"\bsister\b", r"\bson\b", r"\bdaughter\b",
+    r"\bfather\b", r"\bmother\b", r"\bhusband\b", r"\bwife\b",
+    r"\bboyfriend\b", r"\bgirlfriend\b", r"\buncle\b", r"\baunt\b",
+    r"\bnephew\b", r"\bniece\b", r"\bgrandfather\b", r"\bgrandmother\b",
+    r"\bgrandson\b", r"\bgranddaughter\b", r"\bwidower\b", r"\bwidow\b",
+    r"\bactor\b", r"\bactress\b",
+]
+
+_SCRUB_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in _PRONOUNS + _HONORIFICS + _GENDERED_NOUNS
+]
+_PLACEHOLDER = "[PERSON]"
+
+PROFESSION_LABELS: dict[int, str] = {
+    0: "accountant", 1: "architect", 2: "attorney", 3: "chiropractor",
+    4: "comedian", 5: "composer", 6: "dentist", 7: "dietitian",
+    8: "dj", 9: "filmmaker", 10: "interior_designer", 11: "journalist",
+    12: "model", 13: "nurse", 14: "painter", 15: "paralegal",
+    16: "pastor", 17: "personal_trainer", 18: "photographer", 19: "physician",
+    20: "poet", 21: "professor", 22: "psychologist", 23: "rapper",
+    24: "software_engineer", 25: "surgeon", 26: "teacher", 27: "yoga_teacher",
+}
+
+
+def _scrub_gender(text: str) -> str:
+    """Remove explicit gender indicators from biography text."""
+    for pat in _SCRUB_PATTERNS:
+        text = pat.sub(_PLACEHOLDER, text)
+    text = re.sub(r"(\[PERSON\]\s*){2,}", _PLACEHOLDER + " ", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _load_biosbias(n_items: int, seed: int, *, hf_token: str | None = None) -> pd.DataFrame:
+    from datasets import load_dataset as hf_load  # noqa: PLC0415
+
+    ds = hf_load(BIOSBIAS_HF_SLUG, split="train", token=hf_token)
+    df = ds.to_pandas()
+
+    # Normalise integer-encoded gender (LabHC schema: 0=M, 1=F)
+    if str(df["gender"].dtype).startswith("int"):
+        df["gender"] = df["gender"].map({0: "M", 1: "F"})
+
+    # Normalise integer-encoded profession
+    if str(df["profession"].dtype).startswith("int"):
+        df["profession"] = df["profession"].map(PROFESSION_LABELS)
+
+    # hard_text already strips the opening name-sentence; fall back to text
+    text_col = "hard_text" if "hard_text" in df.columns else "text"
+    df["bio_text"] = df[text_col].astype(str)
+    df = df[df["bio_text"].str.len() >= 20].reset_index(drop=True)
+    df["bio_text"] = df["bio_text"].apply(_scrub_gender)
+
+    # Stratified sample: half male / half female
+    rng = np.random.default_rng(seed)
+    half = n_items // 2
+    male = df[df["gender"] == "M"].sample(half, random_state=int(rng.integers(1_000_000)))
+    female = df[df["gender"] == "F"].sample(n_items - half, random_state=int(rng.integers(1_000_000)))
+    sampled = (
+        pd.concat([male, female])
+        .sample(frac=1, random_state=int(rng.integers(1_000_000)))
+        .reset_index(drop=True)
+    )
+
+    rows = []
+    for i, (_, row) in enumerate(sampled.iterrows()):
+        rows.append(
+            {
+                "item_idx": i,
+                "dataset": "biosbias",
+                "prompt_text": str(row["bio_text"]),
+                "profession": str(row.get("profession", "")),
+                "gender": str(row.get("gender", "")),
+            }
+        )
+    df_out = pd.DataFrame(rows)
+    assert len(df_out) == n_items, f"Expected {n_items} BiasBios items, got {len(df_out)}"
+    return df_out
+
+
+# ── MMLU ──────────────────────────────────────────────────────────────────────
+
+MMLU_HF_SLUG = "cais/mmlu"
+MMLU_SUBJECTS = ["abstract_algebra", "moral_scenarios", "virology", "astronomy"]
+_MMLU_SPLIT_PREFERENCE = ("test", "validation")
+
+#: Supported MMLU prompt-text variants.
+MMLU_PROMPT_MODES = ("question_only", "with_choices")
+DEFAULT_MMLU_PROMPT_MODE = "question_only"
+
+_MMLU_CHOICE_LETTERS = ("A", "B", "C", "D")
+
+
+def _format_mmlu_prompt(
+    question: str,
+    choices: list[str] | None = None,
+    *,
+    mode: str = DEFAULT_MMLU_PROMPT_MODE,
+) -> str:
+    """Build the MMLU prompt_text in either question-only or with-choices format.
+
+    "question_only" returns the bare stem (default; matches the original setup).
+    "with_choices" appends labelled A-D options and a trailing "Answer:" cue so
+    Gemma's final-token activation sees the full multiple-choice context.
+    """
+    stem = question.strip()
+    if mode == "question_only":
+        return stem
+    if mode == "with_choices":
+        if choices is None or len(choices) != 4:
+            raise ValueError(
+                "with_choices mode requires a list of exactly four A-D options"
+            )
+        option_lines = "\n".join(
+            f"{letter}. {choice.strip()}"
+            for letter, choice in zip(_MMLU_CHOICE_LETTERS, choices)
+        )
+        return f"Question: {stem}\n{option_lines}\nAnswer:"
+    raise ValueError(
+        f"unknown MMLU prompt mode {mode!r}; expected one of {MMLU_PROMPT_MODES}"
+    )
+
+
+def _mmlu_valid_indices(ds) -> list[int]:
+    return [
+        i
+        for i, row in enumerate(ds)
+        if (
+            row["question"].strip()
+            and len(row["choices"]) == 4
+            and all(c.strip() for c in row["choices"])
+            and row["answer"] is not None
+        )
+    ]
+
+
+def _load_mmlu(
+    n_items: int,
+    seed: int,
+    *,
+    hf_token: str | None = None,
+    mmlu_prompt_mode: str = DEFAULT_MMLU_PROMPT_MODE,
+) -> pd.DataFrame:
+    import json
+
+    from datasets import load_dataset as hf_load
+
+    if mmlu_prompt_mode not in MMLU_PROMPT_MODES:
+        raise ValueError(
+            f"unknown mmlu_prompt_mode {mmlu_prompt_mode!r}; "
+            f"expected one of {MMLU_PROMPT_MODES}"
+        )
+    n_subjects = len(MMLU_SUBJECTS)
+    per_subject = (n_items + n_subjects - 1) // n_subjects  # ceiling division
+
+    # Prefer a single split that works for every subject (test first, then validation).
+    # Only fall back to per-subject selection if no common split covers all subjects.
+    common_split: str | None = None
+    subject_datasets: dict[str, object] = {}
+
+    for split in _MMLU_SPLIT_PREFERENCE:
+        candidate: dict[str, object] = {}
+        for subject in MMLU_SUBJECTS:
+            try:
+                ds = hf_load(MMLU_HF_SLUG, name=subject, split=split, token=hf_token)
+            except Exception:
+                break
+            valid = _mmlu_valid_indices(ds)
+            if len(valid) < per_subject:
+                break
+            candidate[subject] = ds.select(valid)
+        else:
+            # All subjects passed for this split.
+            common_split = split
+            subject_datasets = candidate
+            break
+
+    if common_split is None:
+        # Per-subject fallback: pick the first split that works for each subject individually.
+        for subject in MMLU_SUBJECTS:
+            for split in _MMLU_SPLIT_PREFERENCE:
+                try:
+                    ds = hf_load(MMLU_HF_SLUG, name=subject, split=split, token=hf_token)
+                except Exception:
+                    continue
+                valid = _mmlu_valid_indices(ds)
+                if len(valid) >= per_subject:
+                    subject_datasets[subject] = (split, ds.select(valid))
+                    break
+            else:
+                raise RuntimeError(
+                    f"MMLU subject {subject!r}: no split ({'/'.join(_MMLU_SPLIT_PREFERENCE)}) "
+                    f"with >= {per_subject} valid rows"
+                )
+
+    all_rows: list[dict] = []
+    for subject in MMLU_SUBJECTS:
+        if common_split is not None:
+            used_split = common_split
+            ds = subject_datasets[subject]
+        else:
+            used_split, ds = subject_datasets[subject]  # type: ignore[misc]
+
+        sampled = ds.shuffle(seed=seed).select(range(per_subject))
+        for record in sampled:
+            all_rows.append(
+                {
+                    "subject": subject,
+                    "question": record["question"],
+                    "choices": json.dumps(record["choices"]),
+                    "answer": int(record["answer"]),
+                    "split": used_split,
+                    "prompt_text": _format_mmlu_prompt(
+                        record["question"],
+                        list(record["choices"]),
+                        mode=mmlu_prompt_mode,
+                    ),
+                }
+            )
+
+    df = pd.DataFrame(all_rows[:n_items])
+    df.insert(0, "item_idx", range(len(df)))
+    df.insert(1, "dataset", "mmlu")
+
+    assert len(df) == n_items, f"Expected {n_items} MMLU items, got {len(df)}"
+    return df
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def load_dataset_items(
+    dataset: str,
+    n_items: int = DEFAULT_N_ITEMS,
+    seed: int = DEFAULT_SEED,
+    *,
+    hf_token: str | None = None,
+    mmlu_prompt_mode: str = DEFAULT_MMLU_PROMPT_MODE,
+) -> pd.DataFrame:
+    """Load and sample n_items from the specified dataset.
+
+    Returns DataFrame with columns: item_idx, dataset, prompt_text, plus
+    dataset-specific metadata columns.
+
+    For ``dataset="mmlu"``, ``mmlu_prompt_mode`` selects how prompt_text is
+    formatted:
+      - "question_only" (default): question stem alone.
+      - "with_choices": "Question: …\\nA. …\\nB. …\\nC. …\\nD. …\\nAnswer:".
+    The choice is irrelevant for the other datasets.
+    """
+    if dataset not in SUPPORTED_DATASETS:
+        raise ValueError(
+            f"Unknown dataset {dataset!r}. Choose from: {SUPPORTED_DATASETS}"
+        )
+    if dataset == "prism":
+        return _load_prism(n_items, seed, hf_token=hf_token)
+    if dataset == "mmlu":
+        return _load_mmlu(
+            n_items, seed, hf_token=hf_token, mmlu_prompt_mode=mmlu_prompt_mode
+        )
+    return _load_biosbias(n_items, seed, hf_token=hf_token)

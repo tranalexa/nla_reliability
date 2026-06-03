@@ -216,6 +216,4 @@ pretrained checkpoints) is Anthropic's, and the inference client is kitft's.
 | AV checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-av>      |
 | AR checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>      |
 | Inference client (`NLAClient` + `NLACritic`) | kitft (MIT) | [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders), vendored at [`nla/nla_inference.py`](nla/nla_inference.py) |
-| Reliability evaluation layer      | this repo (MIT) | everything else                                            |
-up of the reliability methodology is in
 

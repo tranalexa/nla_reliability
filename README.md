@@ -37,9 +37,6 @@ probes, and generalizability-theory variance decomposition.
 > }
 > ```
 >
-> See [NOTICE](NOTICE), [CITATION.cff](CITATION.cff), and
-> [nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the full attribution stack.
-
 ---
 
 The four canonical **run_ids** (used everywhere in CLI flags + path helpers):
@@ -122,7 +119,7 @@ for all four. Outputs land on the Modal volume `nla-cache` (mounted at
 > Modal's transient "open files preventing the operation" error on the shared
 > volume. If that happens, just rerun the failing run_id individually.
 
-### Step 1 — Extract activations (≈ 5–15 min per run, 1× A100)
+### Step 1 — Extract activations
 
 ```bash
 uv run modal run extract_activations.py --run-id prism         --n-items 400 --seed 42
@@ -133,7 +130,7 @@ uv run modal run extract_activations.py --run-id mmlu_nochoice --n-items 400 --s
 uv run modal run extract_activations.py --all-runs --n-items 400 --seed 42
 ```
 
-### Step 2 — Sample AV descriptions (≈ 30–90 min per run, up to 12× A100-80GB)
+### Step 2 — Sample AV descriptions
 
 ```bash
 uv run modal run sample_descriptions.py --run-id prism         --n-samples 12
@@ -147,7 +144,7 @@ uv run modal run sample_descriptions.py --all-runs --n-samples 12
 Limit parallel GPUs with `--n-shards 1` (or any value ≤ 12) if you don't have
 the quota.
 
-### Step 3 — AR reconstruction + scoring (≈ 15–45 min per run, up to 12× A100)
+### Step 3 — AR reconstruction + scoring
 
 Pass `--save-vectors` so the centered-cosine diagnostics work locally.
 

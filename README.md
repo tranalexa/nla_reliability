@@ -1,7 +1,7 @@
 # nla_reliability
 
-Reliability evaluation layer on top of Anthropic's **Natural Language Autoencoders (NLA)**.
-We sample 400 items from four canonical runs (PRISM, Bias-in-Bios, MMLU + choices,
+Reliability evaluation for Anthropic's **Natural Language Autoencoders (NLA)**.
+We sample 400 items from four defined runs (PRISM, Bias-in-Bios, MMLU + choices,
 MMLU question-only), extract Gemma-3-12B layer-32 activations, generate 12
 stochastic AV (Activation Verbalizer) descriptions per activation with the
 public NLA AV checkpoint, reconstruct each description back to an activation with
@@ -41,38 +41,6 @@ probes, and generalizability-theory variance decomposition.
 > [nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the full attribution stack.
 
 ---
-
-## Repo structure
-
-```text
-extract_activations.py        Modal Step 1 (Gemma forward pass; **not** Anthropic NLA code)
-sample_descriptions.py        Modal Step 2 (NLAClient = AV; uses Anthropic NLA checkpoint)
-reconstruct_scores.py         Modal Step 3 (NLACritic = AR; uses Anthropic NLA checkpoint)
-nla/
-  __init__.py                 Public re-exports
-  nla_inference.py            VENDORED FROM kitft — NLAClient + NLACritic
-  datasets.py                 PRISM / BiasBios / MMLU loaders (+ mmlu prompt modes)
-  paths.py                    run_id-keyed local + Modal volume path helpers
-  g_theory.py                 G-study + D-study variance decomposition
-  synthesis_metrics.py        Centered fidelity/consistency, probes, summary tables
-  ATTRIBUTION.md              Detailed attribution for the vendored inference client
-scripts/
-  pull_from_modal.py          Download artifacts from Modal volume per run_id
-  compute_text_consistency.py            Within-item MPNet cosine per run_id
-  compute_text_consistency_between.py    Between-item MPNet baseline per run_id
-  g_theory_study.py           G-theory study per run_id and metric
-  train_linear_probes.py      Majority + LR probes (profession / gender)
-  train_linear_probe_mmlu.py  Subject probes for MMLU runs
-  build_synthesis_tables.py   All reports/*.csv + reports/results_table.tex
-  generate_figure_bundle.py   All figures_bundle/*.png (the single figure output dir)
-  smoke_test_loaders.py       No-GPU sanity check that PRISM/BiasBios/MMLU load
-  diagnose_*.py / preview_descriptions.py  ad-hoc inspection utilities
-data/runs/<run_id>/           Local artifacts after pull_from_modal (gitignored)
-reports/                      Synthesis CSVs + LaTeX table (gitignored)
-figures_bundle/               17 paper figures (gitignored)
-notebooks/analysis_synthesis.ipynb   Source notebook (outputs cleared at commit)
-EXPERIMENT_OVERVIEW.md        Full conceptual write-up (provenance + design + metrics)
-```
 
 The four canonical **run_ids** (used everywhere in CLI flags + path helpers):
 
@@ -252,9 +220,5 @@ pretrained checkpoints) is Anthropic's, and the inference client is kitft's.
 | AR checkpoint (Gemma-3-12B L32)   | Anthropic via kitft HF | <https://huggingface.co/kitft/nla-gemma3-12b-L32-ar>      |
 | Inference client (`NLAClient` + `NLACritic`) | kitft (MIT) | [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders), vendored at [`nla/nla_inference.py`](nla/nla_inference.py) |
 | Reliability evaluation layer      | this repo (MIT) | everything else                                            |
+up of the reliability methodology is in
 
-Read [NOTICE](NOTICE) for the formal attribution block,
-[CITATION.cff](CITATION.cff) for citation metadata, and
-[nla/ATTRIBUTION.md](nla/ATTRIBUTION.md) for the per-file vendored-code notes.
-Conceptual write-up of the reliability methodology is in
-[EXPERIMENT_OVERVIEW.md](EXPERIMENT_OVERVIEW.md).
